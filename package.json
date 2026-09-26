@@ -1,0 +1,8 @@
+{
+  "name": "appshub",
+  "version": "3.0.1",
+  "private": true,
+  "description": "Appshub - Play-Store style app download site (React + Supabase)",
+  "scripts": { "compile": "node build.js" },
+  "dependencies": { "web-push": "^3.6.7" }
+}

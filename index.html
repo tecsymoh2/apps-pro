@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Appshub — Download apps</title>
+  <meta name="description" content="Appshub: download apps, read about them, view screenshots and leave reviews." />
+  <meta name="theme-color" content="#01875f" />
+  <meta property="og:site_name" content="Appshub" />
+  <meta property="og:title" content="Appshub — Download apps" />
+  <meta property="og:description" content="Download apps, read about them, view screenshots and leave reviews." />
+  <meta property="og:image" content="/icons/icon-512.png" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" type="image/png" href="/icons/icon-192.png" />
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Appshub" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div id="root"><p style="padding:40px;text-align:center;font-family:sans-serif">Loading Appshub…</p></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+  <script src="/app.js"></script>
+  <script>
+    if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+  </script>
+</body>
+</html>
