@@ -107,7 +107,7 @@ const SB_URL = 'https://mqassrjwcwpnruyflmpz.supabase.co';
 const SB_KEY = 'sb_publishable_2_oaZBr7tu63TC1HMSahMw_PT-H3z3i';
 const sb = supabase.createClient(SB_URL, SB_KEY);
 const ADMIN_EMAIL = 'symoh@appshub.app'; // login username "Symoh" -> symoh@appshub.app
-const RESERVED = ['admin', 'request-app', 'contact', 'apps', 'saved', 'top', 'donate', 'unsubscribe', 'terms', 'privacy', 'compare', 'assets', 'api', 'icons'];
+const RESERVED = ['admin', 'developer', 'request-app', 'contact', 'apps', 'saved', 'top', 'donate', 'unsubscribe', 'terms', 'privacy', 'compare', 'assets', 'api', 'icons'];
 const TABS = [
     ['overview', 'Overview', ''], ['about', 'About', '/about'], ['screenshots', 'Screenshots', '/screenshots'],
     ['reviews', 'Reviews', '/reviews'], ['questions', 'Q&A', '/questions'], ['changelog', 'What’s new', '/changelog'], ['download', 'Download', '/download'],
@@ -405,6 +405,8 @@ function Footer() {
                     React.createElement(Link, { to: "/donate" },
                         "\u2665 ",
                         t(settings.donate_label || 'Support us'))) : null,
+                " \u00B7 ",
+                React.createElement(Link, { to: "/developer" }, "For developers"),
                 " \u00B7 ",
                 React.createElement(Link, { to: "/terms" }, "Terms"),
                 " \u00B7 ",
@@ -1481,6 +1483,8 @@ function App() {
         page = React.createElement(LegalPage, { kind: "privacy" });
     else if (parts[0] === 'compare')
         page = React.createElement(ComparePage, null);
+    else if (parts[0] === 'developer')
+        page = React.createElement(DeveloperPortal, null);
     else if (parts[0] === 'unsubscribe')
         page = React.createElement(UnsubscribePage, null);
     else if (parts[0] === 'request-app')
@@ -1732,7 +1736,7 @@ function MfaChallenge({ onDone }) {
                 React.createElement("button", { className: "btn", disabled: busy }, busy ? 'Checking…' : 'Verify'),
                 React.createElement("button", { type: "button", className: "btn ghost", onClick: () => sb.auth.signOut() }, "Log out")))));
 }
-const ALL_TABS = [['dash', '📊 Dashboard', 0], ['apps', '📦 Apps', 0], ['collections', '🗂 Collections', 0], ['categories', '🏷 Categories', 0], ['reviews', '⭐ Reviews', 0], ['comments', '💬 Q&A', 0], ['requests', '📨 Requests', 0], ['banners', '📢 Ads & banners', 1], ['notify', '📣 Announce', 1], ['team', '👥 Team', 1], ['blocklist', '🚫 Blocklist', 1], ['activity', '📜 Activity log', 1], ['settings', '⚙️ Settings', 1], ['backup', '💾 Backup', 1], ['account', '🔑 My account', 0]];
+const ALL_TABS = [['dash', '📊 Dashboard', 0], ['apps', '📦 Apps', 0], ['developers', '👩‍💻 Developers', 0], ['collections', '🗂 Collections', 0], ['categories', '🏷 Categories', 0], ['reviews', '⭐ Reviews', 0], ['comments', '💬 Q&A', 0], ['requests', '📨 Requests', 0], ['banners', '📢 Ads & banners', 1], ['notify', '📣 Announce', 1], ['team', '👥 Team', 1], ['blocklist', '🚫 Blocklist', 1], ['activity', '📜 Activity log', 1], ['settings', '⚙️ Settings', 1], ['backup', '💾 Backup', 1], ['account', '🔑 My account', 0]];
 function AdminPanel({ role, session }) {
     const [tab, setTab] = useState('dash');
     const owner = role === 'owner';
@@ -1753,6 +1757,7 @@ function AdminPanel({ role, session }) {
         tab === 'banners' && owner && React.createElement(AdminBanners, null),
         tab === 'notify' && owner && React.createElement(AdminNotify, null),
         tab === 'team' && owner && React.createElement(AdminTeam, { session: session }),
+        tab === 'developers' && React.createElement(AdminDevelopers, null),
         tab === 'categories' && React.createElement(AdminCategories, null),
         tab === 'blocklist' && owner && React.createElement(AdminBlocklist, null),
         tab === 'activity' && owner && React.createElement(AdminActivity, null),
@@ -2180,6 +2185,76 @@ function AppForm({ app, dup, onClose }) {
                         v.size),
                     React.createElement("div", { className: "muted small" }, v.download_url)),
                 React.createElement("button", { className: "btn sm danger", onClick: async () => { await sb.from('ah_versions').delete().eq('id', v.id); loadVers(saved.id); } }, "Delete"))))));
+}
+/* ---------- developers (see every developer and their apps) ---------- */
+function AdminDevelopers() {
+    const toast = useToast();
+    const [devs, setDevs] = useState(null);
+    const [apps, setApps] = useState([]);
+    const [open, setOpen] = useState(null);
+    const [q, setQ] = useState('');
+    const load = () => { sb.from('ah_developers').select('*').order('created_at', { ascending: false }).then(({ data }) => setDevs(data || [])); sb.from('ah_apps').select('id,name,slug,owner_id,downloads,is_published,broken_reports').not('owner_id', 'is', null).then(({ data }) => setApps(data || [])); };
+    useEffect(() => { load(); }, []);
+    if (!devs)
+        return React.createElement(Loader, null);
+    const appsFor = (id) => apps.filter((a) => a.owner_id === id);
+    const list = devs.filter((d) => (d.name + d.email).toLowerCase().includes(q.toLowerCase()));
+    const suspend = async (d) => { const { error } = await sb.from('ah_developers').update({ suspended: !d.suspended }).eq('id', d.id); if (error)
+        return toast(error.message); sb.rpc('ah_log', { p_action: d.suspended ? 'unsuspend_developer' : 'suspend_developer', p_detail: d.email }).then(() => { }); toast(d.suspended ? 'Unsuspended — their apps are visible again' : 'Suspended — their apps are hidden from visitors'); load(); };
+    return (React.createElement("div", { className: "card pad" },
+        React.createElement("div", { className: "row between" },
+            React.createElement("h2", null,
+                "Developers (",
+                devs.length,
+                ")"),
+            React.createElement("input", { placeholder: "Filter\u2026", value: q, onChange: (e) => setQ(e.target.value) })),
+        React.createElement("p", { className: "muted small" },
+            "Anyone can sign up at ",
+            React.createElement(Link, { to: "/developer" }, "/developer"),
+            " to add their own apps. Suspending a developer hides all of their apps from visitors immediately."),
+        list.length ? list.map((d) => {
+            const theirApps = appsFor(d.id);
+            const isOpen = open === d.id;
+            return (React.createElement("div", { key: d.id, className: "review" },
+                React.createElement("div", { className: "row between" },
+                    React.createElement("div", null,
+                        React.createElement("b", null, d.name || d.email.split('@')[0]),
+                        " ",
+                        React.createElement("span", { className: "muted small" }, d.email),
+                        d.suspended && React.createElement("span", { className: "chip sm warnchip" }, "suspended"),
+                        " ",
+                        React.createElement("span", { className: "muted small" },
+                            " \u00B7 joined ",
+                            timeAgo(d.created_at)),
+                        d.website && React.createElement(React.Fragment, null,
+                            " \u00B7 ",
+                            React.createElement("a", { href: safeUrl(d.website), target: "_blank", rel: "noopener noreferrer" }, d.website))),
+                    React.createElement("div", { className: "actions" },
+                        React.createElement("button", { className: "btn sm ghost", onClick: () => setOpen(isOpen ? null : d.id) },
+                            theirApps.length,
+                            " app",
+                            theirApps.length === 1 ? '' : 's',
+                            " ",
+                            isOpen ? '▲' : '▼'),
+                        React.createElement("button", { className: 'btn sm' + (d.suspended ? '' : ' danger'), onClick: () => suspend(d) }, d.suspended ? 'Unsuspend' : 'Suspend'))),
+                d.bio && React.createElement("p", { className: "muted small pre" }, d.bio),
+                isOpen && (theirApps.length ? React.createElement("div", { className: "table-wrap", style: { marginTop: 8 } },
+                    React.createElement("table", { className: "table" },
+                        React.createElement("thead", null,
+                            React.createElement("tr", null,
+                                React.createElement("th", null, "App"),
+                                React.createElement("th", null, "Downloads"),
+                                React.createElement("th", null, "Status"))),
+                        React.createElement("tbody", null, theirApps.map((a) => React.createElement("tr", { key: a.id },
+                            React.createElement("td", null,
+                                React.createElement(Link, { to: `/${a.slug}` }, a.name)),
+                            React.createElement("td", null, fmtNum(a.downloads)),
+                            React.createElement("td", null,
+                                a.is_published ? 'Live' : 'Unpublished',
+                                a.broken_reports > 0 && React.createElement("span", { className: "chip sm warnchip" },
+                                    "\u26A0 ",
+                                    a.broken_reports))))))) : React.createElement("p", { className: "muted small" }, "No apps yet."))));
+        }) : React.createElement(Empty, null, "No developers have signed up yet.")));
 }
 /* ---------- managed categories ---------- */
 function CategoryPicker({ value, onChange }) {
@@ -3042,6 +3117,299 @@ function AdminImport() {
             " row(s), imported ",
             result.imported,
             ".")));
+}
+/* =========================================================
+   /developer — self-service developer accounts
+   Developers can add/edit/publish their own apps. Cannot set
+   Featured or Verified (admin-only) — enforced by RLS, not just UI.
+   ========================================================= */
+function DeveloperPortal() {
+    const [session, setSession] = useState(undefined);
+    const [role, setRole] = useState(undefined);
+    useEffect(() => { sb.auth.getSession().then(({ data }) => setSession(data.session)); const { data } = sb.auth.onAuthStateChange((_e, s) => setSession(s)); return () => data.subscription.unsubscribe(); }, []);
+    useEffect(() => { document.title = 'Developer portal — Appshub'; }, []);
+    useEffect(() => { if (session === undefined)
+        return; if (!session)
+        return setRole(null); setRole(undefined); sb.rpc('ah_my_role').then(({ data }) => setRole(data || null)); }, [session]);
+    if (session === undefined || (session && role === undefined))
+        return React.createElement(Loader, null);
+    if (!session)
+        return React.createElement(DevAuth, null);
+    if (role)
+        return (React.createElement("div", { className: "wrap page" },
+            React.createElement("div", { className: "card pad narrow center" },
+                React.createElement("h2", null, "You're an admin"),
+                React.createElement("p", { className: "muted" }, "Admin accounts manage apps from the Admin panel, not here."),
+                React.createElement(Link, { to: "/admin", className: "btn" }, "Go to Admin"))));
+    return React.createElement(DevDashboard, { session: session });
+}
+function DevAuth() {
+    const toast = useToast();
+    const [mode, setMode] = useState('login');
+    const [email, setEmail] = useState('');
+    const [pass, setPass] = useState('');
+    const [name, setName] = useState('');
+    const [busy, setBusy] = useState(false);
+    const [err, setErr] = useState('');
+    const [sent, setSent] = useState(false);
+    const submit = async (e) => {
+        e.preventDefault();
+        setBusy(true);
+        setErr('');
+        if (mode === 'signup') {
+            const { data, error } = await sb.auth.signUp({ email: email.trim(), password: pass, options: { data: { name: name.trim() } } });
+            setBusy(false);
+            if (error)
+                return setErr(error.message);
+            if (data.session) { /* email confirmation is off — signed in immediately */ }
+            else
+                setSent(true);
+        }
+        else {
+            const { error } = await sb.auth.signInWithPassword({ email: email.trim(), password: pass });
+            setBusy(false);
+            if (error)
+                return setErr('Wrong email or password.');
+        }
+    };
+    if (sent)
+        return (React.createElement("div", { className: "wrap page" },
+            React.createElement("div", { className: "card pad narrow center" },
+                React.createElement("h2", null, "Check your email"),
+                React.createElement("p", { className: "muted" },
+                    "We sent a confirmation link to ",
+                    React.createElement("b", null, email),
+                    ". Click it, then come back and log in."))));
+    return (React.createElement("div", { className: "wrap page" },
+        React.createElement("div", { className: "card pad narrow" },
+            React.createElement("h2", null, "\uD83D\uDC69\u200D\uD83D\uDCBB Developer portal"),
+            React.createElement("p", { className: "muted" }, "Add your own apps to Appshub and manage them yourself."),
+            React.createElement("div", { className: "chips", style: { marginBottom: 12 } },
+                React.createElement("button", { className: 'chip' + (mode === 'login' ? ' active' : ''), onClick: () => setMode('login') }, "Log in"),
+                React.createElement("button", { className: 'chip' + (mode === 'signup' ? ' active' : ''), onClick: () => setMode('signup') }, "Sign up")),
+            React.createElement("form", { className: "form", onSubmit: submit },
+                mode === 'signup' && React.createElement("label", null,
+                    "Your name",
+                    React.createElement("input", { required: true, value: name, onChange: (e) => setName(e.target.value), maxLength: 80 })),
+                React.createElement("label", null,
+                    "Email",
+                    React.createElement("input", { required: true, type: "email", autoComplete: "email", value: email, onChange: (e) => setEmail(e.target.value) })),
+                React.createElement("label", null,
+                    "Password",
+                    React.createElement("input", { required: true, type: "password", minLength: 8, autoComplete: mode === 'signup' ? 'new-password' : 'current-password', value: pass, onChange: (e) => setPass(e.target.value) })),
+                err && React.createElement("div", { className: "alert" }, err),
+                React.createElement("button", { className: "btn", disabled: busy }, busy ? 'Please wait…' : mode === 'signup' ? 'Create account' : 'Log in')))));
+}
+const blankDevApp = { name: '', slug: '', icon_url: '', short_desc: '', about: '', features: '', category: 'General', developer: '', version: '1.0', size: '', platform: 'Android', content_rating: 'Everyone', download_url: '', sha256: '', extra_links: '', whats_new: '', seo_keywords: '', seo_description: '', is_published: false };
+function DevDashboard({ session }) {
+    const toast = useToast();
+    const [apps, setApps] = useState(null);
+    const [edit, setEdit] = useState(null);
+    const [profile, setProfile] = useState(null);
+    const [tab, setTab] = useState('apps');
+    const load = () => sb.from('ah_apps').select('*').eq('owner_id', session.user.id).order('created_at', { ascending: false }).then(({ data }) => setApps(data || []));
+    useEffect(() => { load(); sb.from('ah_developers').select('*').eq('id', session.user.id).maybeSingle().then(({ data }) => setProfile(data)); }, []);
+    const del = async (a) => { if (!confirm(`Delete ${a.name}? This can’t be undone.`))
+        return; const { error } = await sb.from('ah_apps').delete().eq('id', a.id); if (error)
+        toast(error.message);
+    else {
+        toast('Deleted');
+        load();
+    } };
+    return (React.createElement("div", { className: "wrap page" },
+        React.createElement("div", { className: "row between" },
+            React.createElement("h1", null, "\uD83D\uDC69\u200D\uD83D\uDCBB Developer portal"),
+            React.createElement("button", { className: "btn ghost", onClick: () => sb.auth.signOut() }, "Log out")),
+        React.createElement("nav", { className: "tabs" },
+            React.createElement("button", { className: 'tab' + (tab === 'apps' ? ' active' : ''), onClick: () => setTab('apps') }, "My apps"),
+            React.createElement("button", { className: 'tab' + (tab === 'profile' ? ' active' : ''), onClick: () => setTab('profile') }, "Profile")),
+        tab === 'profile' && profile && React.createElement(DevProfileForm, { profile: profile, onSaved: setProfile }),
+        tab === 'apps' && (edit ? React.createElement(DevAppForm, { app: edit === 'new' ? null : edit, session: session, onClose: () => { setEdit(null); load(); } }) : (!apps ? React.createElement(Loader, null) : (React.createElement("div", { className: "card pad" },
+            React.createElement("div", { className: "row between" },
+                React.createElement("h2", null,
+                    "My apps (",
+                    apps.length,
+                    ")"),
+                React.createElement("button", { className: "btn", onClick: () => setEdit('new') }, "+ Add app")),
+            apps.length ? React.createElement("div", { className: "table-wrap" },
+                React.createElement("table", { className: "table" },
+                    React.createElement("thead", null,
+                        React.createElement("tr", null,
+                            React.createElement("th", null, "App"),
+                            React.createElement("th", null, "Version"),
+                            React.createElement("th", null, "Downloads"),
+                            React.createElement("th", null, "Status"),
+                            React.createElement("th", null))),
+                    React.createElement("tbody", null, apps.map((a) => React.createElement("tr", { key: a.id },
+                        React.createElement("td", null,
+                            React.createElement("div", { className: "row" },
+                                React.createElement(Icon, { app: a, size: 36 }),
+                                React.createElement("div", null,
+                                    React.createElement("b", null, a.name),
+                                    " ",
+                                    a.is_verified && React.createElement(Verified, null),
+                                    React.createElement("div", { className: "muted small" },
+                                        "/",
+                                        a.slug)))),
+                        React.createElement("td", null, a.version),
+                        React.createElement("td", null, fmtNum(a.downloads)),
+                        React.createElement("td", null,
+                            a.is_published ? 'Live' : 'Unpublished',
+                            a.broken_reports > 0 && React.createElement("span", { className: "chip sm warnchip" },
+                                "\u26A0 ",
+                                a.broken_reports)),
+                        React.createElement("td", { className: "actions" },
+                            React.createElement("button", { className: "btn sm ghost", onClick: () => { navigator.clipboard.writeText(appUrl(a.slug)); toast('Link copied'); } }, "Copy link"),
+                            React.createElement("button", { className: "btn sm", onClick: () => setEdit(a) }, "Edit"),
+                            React.createElement("button", { className: "btn sm danger", onClick: () => del(a) }, "Delete"))))))) : React.createElement("div", { className: "wizard card pad" },
+                React.createElement("h3", null, "\uD83D\uDC4B Welcome!"),
+                React.createElement("p", { className: "muted" }, "You haven\u2019t added any apps yet. Add one, fill in the details, and turn on \u201CPublished\u201D whenever you\u2019re ready."),
+                React.createElement("button", { className: "btn big", onClick: () => setEdit('new') }, "+ Add your first app"))))))));
+}
+function DevProfileForm({ profile, onSaved }) {
+    const toast = useToast();
+    const [name, setName] = useState(profile.name || '');
+    const [bio, setBio] = useState(profile.bio || '');
+    const [site, setSite] = useState(profile.website || '');
+    const [busy, setBusy] = useState(false);
+    const save = async (e) => { e.preventDefault(); setBusy(true); const { error } = await sb.rpc('ah_dev_update_profile', { p_name: name, p_bio: bio, p_website: site }); setBusy(false); if (error)
+        return toast(error.message); toast('Saved'); onSaved({ ...profile, name, bio, website: site }); };
+    return (React.createElement("div", { className: "card pad narrow" },
+        React.createElement("h2", null, "Your developer profile"),
+        React.createElement("p", { className: "muted small" }, "Shown to Appshub admins; \u201COffered by\u201D on your app pages uses the developer name you set per app, not this profile."),
+        React.createElement("form", { className: "form", onSubmit: save },
+            React.createElement("label", null,
+                "Display name",
+                React.createElement("input", { value: name, onChange: (e) => setName(e.target.value), maxLength: 80 })),
+            React.createElement("label", null,
+                "Bio",
+                React.createElement("textarea", { rows: 3, value: bio, onChange: (e) => setBio(e.target.value), maxLength: 1000 })),
+            React.createElement("label", null,
+                "Website",
+                React.createElement("input", { value: site, onChange: (e) => setSite(e.target.value), placeholder: "https://\u2026", maxLength: 300 })),
+            React.createElement("button", { className: "btn", disabled: busy }, busy ? 'Saving…' : 'Save profile'))));
+}
+function DevAppForm({ app, session, onClose }) {
+    const toast = useToast();
+    const [saved, setSaved] = useState(app);
+    const [f, setF] = useState(() => app ? { ...blankDevApp, ...app, features: (app.features || []).join('\n'), extra_links: (app.extra_links || []).map((l) => `${l.label} | ${l.url}`).join('\n') } : blankDevApp);
+    const [shots, setShots] = useState([]);
+    const [busy, setBusy] = useState('');
+    const [slugTouched, setSlugTouched] = useState(!!app);
+    const set = (k) => (e) => setF({ ...f, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value });
+    const loadShots = (id) => sb.from('ah_screenshots').select('*').eq('app_id', id).order('sort').then(({ data }) => setShots(data || []));
+    useEffect(() => { if (saved)
+        loadShots(saved.id); }, [saved === null || saved === void 0 ? void 0 : saved.id]);
+    const onName = (e) => { const name = e.target.value; setF({ ...f, name, slug: slugTouched ? f.slug : slugify(name) }); };
+    const up = async (file, apply, folder, hashTo) => { if (!file)
+        return; setBusy('Uploading ' + file.name + '…'); try {
+        apply(await uploadFile(file, folder));
+        if (hashTo)
+            hashTo(await sha256File(file));
+        toast('Uploaded');
+    }
+    catch (e) {
+        toast('Upload failed: ' + e.message);
+    } setBusy(''); };
+    const save = async (e) => {
+        e.preventDefault();
+        const slug = slugify(f.slug || f.name);
+        if (!slug || RESERVED.includes(slug))
+            return toast('That link name is reserved or empty — pick another.');
+        const extra = lines(f.extra_links).map((l) => { const [label, ...u] = l.split('|'); return { label: (label || '').trim() || 'Mirror', url: u.join('|').trim() }; }).filter((l) => safeUrl(l.url));
+        const row = { name: f.name.trim(), slug, owner_id: session.user.id, icon_url: f.icon_url || null, short_desc: f.short_desc, about: f.about, features: lines(f.features), category: f.category.trim() || 'General', developer: f.developer, version: f.version, size: f.size, platform: f.platform, content_rating: f.content_rating, download_url: f.download_url.trim(), sha256: (f.sha256 || '').trim().toLowerCase(), extra_links: extra, whats_new: f.whats_new, seo_keywords: f.seo_keywords || '', seo_description: f.seo_description || '', is_published: f.is_published };
+        setBusy('Saving…');
+        const { data, error } = await (saved ? sb.from('ah_apps').update(row).eq('id', saved.id).select().single() : sb.from('ah_apps').insert(row).select().single());
+        setBusy('');
+        if (error)
+            return toast(error.code === '23505' ? 'That link name is already used by another app.' : error.message);
+        setSaved(data);
+        setF((x) => ({ ...x, slug }));
+        toast(saved ? 'Changes saved' : 'App created — add a screenshot below, then publish it');
+    };
+    const addShots = async (files) => { let sort = shots.length ? Math.max(...shots.map((s) => s.sort)) + 1 : 0; for (const file of files) {
+        setBusy('Uploading ' + file.name + '…');
+        try {
+            const url = await uploadFile(file, `dev/${session.user.id}/screenshots`);
+            await sb.from('ah_screenshots').insert({ app_id: saved.id, url, sort: sort++ });
+        }
+        catch (e) {
+            toast('Failed: ' + e.message);
+        }
+    } setBusy(''); loadShots(saved.id); };
+    const delShot = async (s) => { await sb.from('ah_screenshots').delete().eq('id', s.id); loadShots(saved.id); };
+    return (React.createElement("div", { className: "card pad" },
+        React.createElement("div", { className: "row between" },
+            React.createElement("h2", null, saved ? `Edit ${saved.name}` : 'Add app'),
+            React.createElement("button", { className: "btn ghost", onClick: onClose }, "\u2190 Back to my apps")),
+        saved && React.createElement("p", { className: "muted small" },
+            "Link: ",
+            React.createElement("a", { href: appUrl(saved.slug), target: "_blank", rel: "noreferrer" }, appUrl(saved.slug))),
+        React.createElement("form", { className: "form two", onSubmit: save },
+            React.createElement("label", null,
+                "App name",
+                React.createElement("input", { required: true, value: f.name, onChange: onName })),
+            React.createElement("label", null,
+                "Link name (URL)",
+                React.createElement("input", { required: true, value: f.slug, onChange: (e) => { setSlugTouched(true); setF({ ...f, slug: slugify(e.target.value) }); } })),
+            React.createElement("label", null,
+                "Category",
+                React.createElement("input", { value: f.category, onChange: set('category'), placeholder: "Games, Tools, Social\u2026" })),
+            React.createElement("label", null,
+                "Developer / studio name",
+                React.createElement("input", { value: f.developer, onChange: set('developer'), placeholder: "Shown on the app page" })),
+            React.createElement("label", null,
+                "Version",
+                React.createElement("input", { value: f.version, onChange: set('version') })),
+            React.createElement("label", null,
+                "Size",
+                React.createElement("input", { value: f.size, onChange: set('size'), placeholder: "e.g. 48 MB" })),
+            React.createElement("label", null,
+                "Platform",
+                React.createElement("input", { value: f.platform, onChange: set('platform') })),
+            React.createElement("label", null,
+                "Content rating",
+                React.createElement("input", { value: f.content_rating, onChange: set('content_rating'), placeholder: "Everyone, 12+, 18+" })),
+            React.createElement("label", { className: "full" },
+                "Icon",
+                React.createElement("input", { value: f.icon_url || '', onChange: set('icon_url'), placeholder: "URL or upload \u2193" }),
+                React.createElement("input", { type: "file", accept: "image/*", onChange: (e) => up(e.target.files[0], (u) => setF((x) => ({ ...x, icon_url: u })), `dev/${session.user.id}/icons`) })),
+            React.createElement("label", { className: "full" },
+                "Short description",
+                React.createElement("input", { value: f.short_desc, onChange: set('short_desc'), maxLength: 200 })),
+            React.createElement("div", { className: "full" },
+                React.createElement("label", null, "About this app"),
+                React.createElement(MdEditor, { rows: 7, value: f.about, onChange: (v) => setF((x) => ({ ...x, about: v })) })),
+            React.createElement("label", { className: "full" },
+                "Features (one per line)",
+                React.createElement("textarea", { rows: 4, value: f.features, onChange: set('features') })),
+            React.createElement("div", { className: "full" },
+                React.createElement("label", null, "What's new"),
+                React.createElement(MdEditor, { rows: 3, value: f.whats_new, onChange: (v) => setF((x) => ({ ...x, whats_new: v })) })),
+            React.createElement("label", { className: "full" },
+                "Download link",
+                React.createElement("input", { value: f.download_url, onChange: set('download_url'), placeholder: "https://\u2026 or upload a file \u2193" }),
+                React.createElement("input", { type: "file", onChange: (e) => up(e.target.files[0], (u) => setF((x) => ({ ...x, download_url: u })), `dev/${session.user.id}/files`, (h) => setF((x) => ({ ...x, sha256: h }))) }),
+                React.createElement("small", { className: "muted" }, "Up to 100 MB.")),
+            React.createElement("label", { className: "full" },
+                "Extra download links / mirrors (Label | URL, one per line)",
+                React.createElement("textarea", { rows: 2, value: f.extra_links, onChange: set('extra_links') })),
+            React.createElement("label", { className: "full" },
+                "SEO description",
+                React.createElement("input", { value: f.seo_description || '', onChange: set('seo_description'), maxLength: 200 })),
+            React.createElement("label", { className: "check" },
+                React.createElement("input", { type: "checkbox", checked: f.is_published, onChange: set('is_published') }),
+                " Published (visible to visitors)"),
+            React.createElement("div", { className: "full row" },
+                React.createElement("button", { className: "btn", disabled: !!busy }, saved ? 'Save changes' : 'Create app'),
+                busy && React.createElement("span", { className: "muted" }, busy))),
+        saved && React.createElement(React.Fragment, null,
+            React.createElement("hr", null),
+            React.createElement("h3", null, "Screenshots"),
+            React.createElement("input", { type: "file", accept: "image/*", multiple: true, onChange: (e) => { addShots([...e.target.files]); e.target.value = ''; } }),
+            React.createElement("div", { className: "shots-admin" }, shots.map((s) => React.createElement("div", { key: s.id },
+                React.createElement("img", { src: s.url, alt: "" }),
+                React.createElement("button", { className: "btn sm danger", onClick: () => delShot(s) }, "\u2715")))))));
 }
 /* Entry: re-mounts the app when the language changes */
 function Root() {

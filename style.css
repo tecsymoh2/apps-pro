@@ -221,3 +221,6 @@ a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,te
 table.compare th,table.compare td{text-align:center}
 table.compare td:first-child,table.compare th:first-child{text-align:left;color:var(--muted)}
 table.compare th a{display:flex;flex-direction:column;align-items:center;gap:6px;color:var(--text)!important}
+
+/* ----- developer portal ----- */
+.chips.inline, .chips{align-items:center}
