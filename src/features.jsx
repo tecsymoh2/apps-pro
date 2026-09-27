@@ -314,6 +314,7 @@ function App() {
   else if (parts[0] === 'terms') page = <LegalPage kind="terms" />;
   else if (parts[0] === 'privacy') page = <LegalPage kind="privacy" />;
   else if (parts[0] === 'compare') page = <ComparePage />;
+  else if (parts[0] === 'developer') page = <DeveloperPortal />;
   else if (parts[0] === 'unsubscribe') page = <UnsubscribePage />;
   else if (parts[0] === 'request-app') page = <RequestApp />;
   else if (parts[0] === 'contact') page = <Contact />;

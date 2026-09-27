@@ -85,7 +85,7 @@ function MfaChallenge({ onDone }) {
     <form className="form" onSubmit={submit}><input required autoFocus inputMode="numeric" maxLength={6} value={code} onChange={(e) => setCode(e.target.value)} />{err && <div className="alert">{err}</div>}
       <button className="btn" disabled={busy}>{busy ? 'Checking…' : 'Verify'}</button><button type="button" className="btn ghost" onClick={() => sb.auth.signOut()}>Log out</button></form></div></div>);
 }
-const ALL_TABS = [['dash', '📊 Dashboard', 0], ['apps', '📦 Apps', 0], ['collections', '🗂 Collections', 0], ['categories', '🏷 Categories', 0], ['reviews', '⭐ Reviews', 0], ['comments', '💬 Q&A', 0], ['requests', '📨 Requests', 0], ['banners', '📢 Ads & banners', 1], ['notify', '📣 Announce', 1], ['team', '👥 Team', 1], ['blocklist', '🚫 Blocklist', 1], ['activity', '📜 Activity log', 1], ['settings', '⚙️ Settings', 1], ['backup', '💾 Backup', 1], ['account', '🔑 My account', 0]];
+const ALL_TABS = [['dash', '📊 Dashboard', 0], ['apps', '📦 Apps', 0], ['developers', '👩‍💻 Developers', 0], ['collections', '🗂 Collections', 0], ['categories', '🏷 Categories', 0], ['reviews', '⭐ Reviews', 0], ['comments', '💬 Q&A', 0], ['requests', '📨 Requests', 0], ['banners', '📢 Ads & banners', 1], ['notify', '📣 Announce', 1], ['team', '👥 Team', 1], ['blocklist', '🚫 Blocklist', 1], ['activity', '📜 Activity log', 1], ['settings', '⚙️ Settings', 1], ['backup', '💾 Backup', 1], ['account', '🔑 My account', 0]];
 function AdminPanel({ role, session }) {
   const [tab, setTab] = useState('dash'); const owner = role === 'owner';
   const tabs = ALL_TABS.filter((t) => owner || !t[2]);
@@ -93,6 +93,7 @@ function AdminPanel({ role, session }) {
     <nav className="tabs">{tabs.map(([k, l]) => <button key={k} className={'tab' + (k === tab ? ' active' : '')} onClick={() => setTab(k)}>{l}</button>)}</nav>
     {tab === 'dash' && <AdminDash />}{tab === 'apps' && <AdminApps owner={owner} />}{tab === 'collections' && <AdminCollections />}{tab === 'reviews' && <AdminReviews />}{tab === 'comments' && <AdminComments />}
     {tab === 'requests' && <AdminRequests />}{tab === 'banners' && owner && <AdminBanners />}{tab === 'notify' && owner && <AdminNotify />}{tab === 'team' && owner && <AdminTeam session={session} />}
+    {tab === 'developers' && <AdminDevelopers />}
     {tab === 'categories' && <AdminCategories />}
     {tab === 'blocklist' && owner && <AdminBlocklist />}{tab === 'activity' && owner && <AdminActivity />}
     {tab === 'settings' && owner && <AdminSettings />}{tab === 'backup' && owner && <AdminBackup />}{tab === 'account' && <AdminAccount session={session} role={role} />}</div>);
@@ -225,6 +226,28 @@ function AppForm({ app, dup, onClose }) {
         <div className="full row"><button className="btn" type="button" onClick={releaseNew}>Release new version</button><button className="btn ghost" type="button" onClick={addOld}>Add as older version</button></div></div>
       {versions.map((v) => <div key={v.id} className="review row between"><div><b>v{v.version}</b> <span className="muted small">{new Date(v.created_at).toLocaleDateString()} {v.size}</span><div className="muted small">{v.download_url}</div></div><button className="btn sm danger" onClick={async () => { await sb.from('ah_versions').delete().eq('id', v.id); loadVers(saved.id); }}>Delete</button></div>)}</>}
   </div>);
+}
+
+/* ---------- developers (see every developer and their apps) ---------- */
+function AdminDevelopers() {
+  const toast = useToast(); const [devs, setDevs] = useState(null); const [apps, setApps] = useState([]); const [open, setOpen] = useState(null); const [q, setQ] = useState('');
+  const load = () => { sb.from('ah_developers').select('*').order('created_at', { ascending: false }).then(({ data }) => setDevs(data || [])); sb.from('ah_apps').select('id,name,slug,owner_id,downloads,is_published,broken_reports').not('owner_id', 'is', null).then(({ data }) => setApps(data || [])); };
+  useEffect(() => { load(); }, []);
+  if (!devs) return <Loader />;
+  const appsFor = (id) => apps.filter((a) => a.owner_id === id);
+  const list = devs.filter((d) => (d.name + d.email).toLowerCase().includes(q.toLowerCase()));
+  const suspend = async (d) => { const { error } = await sb.from('ah_developers').update({ suspended: !d.suspended }).eq('id', d.id); if (error) return toast(error.message); sb.rpc('ah_log', { p_action: d.suspended ? 'unsuspend_developer' : 'suspend_developer', p_detail: d.email }).then(() => {}); toast(d.suspended ? 'Unsuspended — their apps are visible again' : 'Suspended — their apps are hidden from visitors'); load(); };
+  return (<div className="card pad"><div className="row between"><h2>Developers ({devs.length})</h2><input placeholder="Filter…" value={q} onChange={(e) => setQ(e.target.value)} /></div>
+    <p className="muted small">Anyone can sign up at <Link to="/developer">/developer</Link> to add their own apps. Suspending a developer hides all of their apps from visitors immediately.</p>
+    {list.length ? list.map((d) => { const theirApps = appsFor(d.id); const isOpen = open === d.id; return (
+      <div key={d.id} className="review">
+        <div className="row between"><div><b>{d.name || d.email.split('@')[0]}</b> <span className="muted small">{d.email}</span>{d.suspended && <span className="chip sm warnchip">suspended</span>} <span className="muted small"> · joined {timeAgo(d.created_at)}</span>{d.website && <> · <a href={safeUrl(d.website)} target="_blank" rel="noopener noreferrer">{d.website}</a></>}</div>
+          <div className="actions"><button className="btn sm ghost" onClick={() => setOpen(isOpen ? null : d.id)}>{theirApps.length} app{theirApps.length === 1 ? '' : 's'} {isOpen ? '▲' : '▼'}</button><button className={'btn sm' + (d.suspended ? '' : ' danger')} onClick={() => suspend(d)}>{d.suspended ? 'Unsuspend' : 'Suspend'}</button></div></div>
+        {d.bio && <p className="muted small pre">{d.bio}</p>}
+        {isOpen && (theirApps.length ? <div className="table-wrap" style={{ marginTop: 8 }}><table className="table"><thead><tr><th>App</th><th>Downloads</th><th>Status</th></tr></thead><tbody>
+          {theirApps.map((a) => <tr key={a.id}><td><Link to={`/${a.slug}`}>{a.name}</Link></td><td>{fmtNum(a.downloads)}</td><td>{a.is_published ? 'Live' : 'Unpublished'}{a.broken_reports > 0 && <span className="chip sm warnchip">⚠ {a.broken_reports}</span>}</td></tr>)}
+        </tbody></table></div> : <p className="muted small">No apps yet.</p>)}
+      </div>); }) : <Empty>No developers have signed up yet.</Empty>}</div>);
 }
 
 /* ---------- managed categories ---------- */

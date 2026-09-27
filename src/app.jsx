@@ -8,7 +8,7 @@ const SB_URL = 'https://mqassrjwcwpnruyflmpz.supabase.co';
 const SB_KEY = 'sb_publishable_2_oaZBr7tu63TC1HMSahMw_PT-H3z3i';
 const sb = supabase.createClient(SB_URL, SB_KEY);
 const ADMIN_EMAIL = 'symoh@appshub.app';   // login username "Symoh" -> symoh@appshub.app
-const RESERVED = ['admin', 'request-app', 'contact', 'apps', 'saved', 'top', 'donate', 'unsubscribe', 'terms', 'privacy', 'compare', 'assets', 'api', 'icons'];
+const RESERVED = ['admin', 'developer', 'request-app', 'contact', 'apps', 'saved', 'top', 'donate', 'unsubscribe', 'terms', 'privacy', 'compare', 'assets', 'api', 'icons'];
 const TABS = [
   ['overview', 'Overview', ''], ['about', 'About', '/about'], ['screenshots', 'Screenshots', '/screenshots'],
   ['reviews', 'Reviews', '/reviews'], ['questions', 'Q&A', '/questions'], ['changelog', 'What’s new', '/changelog'], ['download', 'Download', '/download'],
@@ -185,7 +185,7 @@ function BottomNav() {
 function Footer() {
   const { settings } = useSite();
   return (<footer className="footer"><div className="wrap"><b>{settings.site_name || 'Appshub'}</b> — {settings.tagline}
-    <div className="muted small">© {new Date().getFullYear()} · <Link to="/request-app">{t('Request an app')}</Link> · <Link to="/contact">{t('Contact admin')}</Link> · <Link to="/top">{t('Top charts')}</Link>{settings.donate_url || settings.donate_text ? <> · <Link to="/donate">♥ {t(settings.donate_label || 'Support us')}</Link></> : null} · <Link to="/terms">Terms</Link> · <Link to="/privacy">Privacy</Link> · <a href="/feed.xml">RSS</a></div></div></footer>);
+    <div className="muted small">© {new Date().getFullYear()} · <Link to="/request-app">{t('Request an app')}</Link> · <Link to="/contact">{t('Contact admin')}</Link> · <Link to="/top">{t('Top charts')}</Link>{settings.donate_url || settings.donate_text ? <> · <Link to="/donate">♥ {t(settings.donate_label || 'Support us')}</Link></> : null} · <Link to="/developer">For developers</Link> · <Link to="/terms">Terms</Link> · <Link to="/privacy">Privacy</Link> · <a href="/feed.xml">RSS</a></div></div></footer>);
 }
 function TopBanners() {
   const { banners, settings } = useSite(); const list = banners.filter((b) => b.placement === 'banner');
