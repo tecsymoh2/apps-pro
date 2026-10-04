@@ -1995,8 +1995,17 @@ function AdminApps({ owner }) {
 function AppForm({ app, dup, onClose }) {
     const toast = useToast();
     const [saved, setSaved] = useState(dup ? null : app);
-    const [f, setF] = useState(() => { if (!app)
-        return blankApp; const base = { ...blankApp, ...app, features: (app.features || []).join('\n'), extra_links: (app.extra_links || []).map((l) => `${l.label} | ${l.url}`).join('\n'), publish_at: app.publish_at ? new Date(new Date(app.publish_at).getTime() - new Date(app.publish_at).getTimezoneOffset() * 60000).toISOString().slice(0, 16) : '' }; return dup ? { ...base, name: app.name + ' (copy)', slug: app.slug + '-copy', is_published: false, is_featured: false, is_verified: false, publish_at: '' } : base; });
+    const dKey = 'ah_admin_draft:' + (dup ? 'dup-' + app.id : (app ? app.id : 'new'));
+    const [f, setF] = useState(() => {
+        const base = (() => { if (!app)
+            return blankApp; const b = { ...blankApp, ...app, features: (app.features || []).join('\n'), extra_links: (app.extra_links || []).map((l) => `${l.label} | ${l.url}`).join('\n'), publish_at: app.publish_at ? new Date(new Date(app.publish_at).getTime() - new Date(app.publish_at).getTimezoneOffset() * 60000).toISOString().slice(0, 16) : '' }; return dup ? { ...b, name: app.name + ' (copy)', slug: app.slug + '-copy', is_published: false, is_featured: false, is_verified: false, publish_at: '' } : b; })();
+        const draft = lsGet(dKey, null);
+        return draft || base;
+    });
+    const [restored] = useState(() => !!lsGet(dKey, null));
+    useEffect(() => { if (restored)
+        toast('Restored your unsaved draft — a reload (e.g. while picking a file) no longer loses your work'); }, []);
+    useEffect(() => { lsSet(dKey, f); }, [f]);
     const [shots, setShots] = useState([]);
     const [versions, setVersions] = useState([]);
     const [busy, setBusy] = useState('');
@@ -2057,6 +2066,10 @@ function AppForm({ app, dup, onClose }) {
         sb.rpc('ah_log', { p_action: saved ? 'edit_app' : 'create_app', p_detail: data.name }).then(() => { });
         setSaved(data);
         setF((x) => ({ ...x, slug }));
+        try {
+            localStorage.removeItem(dKey);
+        }
+        catch { }
         toast(saved ? 'Changes saved' : 'App created — now add screenshots and versions below');
     };
     const addShots = async (files) => { let sort = shots.length ? Math.max(...shots.map((s) => s.sort)) + 1 : 0; for (const file of files) {
@@ -2091,7 +2104,10 @@ function AppForm({ app, dup, onClose }) {
     return (React.createElement("div", { className: "card pad" },
         React.createElement("div", { className: "row between" },
             React.createElement("h2", null, saved ? `Edit ${saved.name}` : dup ? 'Duplicate app' : 'Add app'),
-            React.createElement("button", { className: "btn ghost", onClick: onClose }, "\u2190 Back to apps")),
+            React.createElement("button", { className: "btn ghost", onClick: () => { try {
+                    localStorage.removeItem(dKey);
+                }
+                catch { } onClose(); } }, "\u2190 Back to apps")),
         saved && React.createElement("p", { className: "muted small" },
             "Share link: ",
             React.createElement("a", { href: appUrl(saved.slug), target: "_blank", rel: "noreferrer" }, appUrl(saved.slug))),
@@ -2586,13 +2602,26 @@ function AdminRequests() {
                 React.createElement("button", { className: "btn sm danger", onClick: async () => { await sb.from('ah_requests').delete().eq('id', r.id); load(); } }, "Delete")))) : React.createElement(Empty, null, "Nothing here.")));
 }
 /* ---------- ads & banners (owner) ---------- */
+const bannerDraftKey = (id) => 'ah_admin_draft:banner-' + (id || 'new');
 function AdminBanners() {
     const toast = useToast();
     const [rows, setRows] = useState(null);
     const [f, setF] = useState(null);
     const [busy, setBusy] = useState(false);
+    const [restoredMsg, setRestoredMsg] = useState(false);
     const load = () => sb.from('ah_banners').select('*').order('created_at', { ascending: false }).then(({ data }) => setRows(data || []));
     useEffect(() => { load(); }, []);
+    useEffect(() => { if (!f)
+        return; lsSet(bannerDraftKey(f.id), f); }, [f]);
+    const open = (base) => { const draft = lsGet(bannerDraftKey(base.id), null); setRestoredMsg(!!draft); setF(draft || base); };
+    useEffect(() => { if (restoredMsg) {
+        toast('Restored your unsaved draft');
+        setRestoredMsg(false);
+    } }, [restoredMsg]);
+    const cancel = () => { try {
+        localStorage.removeItem(bannerDraftKey(f.id));
+    }
+    catch { } setF(null); };
     const save = async (e) => {
         e.preventDefault();
         const { id, created_at, clicks, impressions, ...row } = f;
@@ -2603,6 +2632,10 @@ function AdminBanners() {
         const { error } = id ? await sb.from('ah_banners').update(row).eq('id', id) : await sb.from('ah_banners').insert(row);
         if (error)
             return toast(error.message);
+        try {
+            localStorage.removeItem(bannerDraftKey(id));
+        }
+        catch { }
         toast('Saved');
         setF(null);
         load();
@@ -2651,11 +2684,11 @@ function AdminBanners() {
                     " Active"),
                 React.createElement("div", { className: "row" },
                     React.createElement("button", { className: "btn", disabled: busy }, busy ? 'Uploading…' : 'Save'),
-                    React.createElement("button", { type: "button", className: "btn ghost", onClick: () => setF(null) }, "Cancel")))));
+                    React.createElement("button", { type: "button", className: "btn ghost", onClick: cancel }, "Cancel")))));
     return (React.createElement("div", { className: "card pad" },
         React.createElement("div", { className: "row between" },
             React.createElement("h2", null, "Ads & banners"),
-            React.createElement("button", { className: "btn", onClick: () => setF({ placement: 'popup', title: '', message: '', image_url: '', link_url: '', starts_at: null, ends_at: null, active: true }) }, "+ New")),
+            React.createElement("button", { className: "btn", onClick: () => open({ placement: 'popup', title: '', message: '', image_url: '', link_url: '', starts_at: null, ends_at: null, active: true }) }, "+ New")),
         React.createElement("p", { className: "muted small" }, "Pop-up ads appear before every download (a random live one is shown). With none live, downloads start immediately."),
         rows.length ? rows.map((b) => {
             const live = isLive(b);
@@ -2681,7 +2714,7 @@ function AdminBanners() {
                             b.ends_at && ` · until ${new Date(b.ends_at).toLocaleDateString()}`))),
                 React.createElement("div", { className: "actions" },
                     React.createElement("button", { className: "btn sm ghost", onClick: async () => { await sb.from('ah_banners').update({ active: !b.active }).eq('id', b.id); load(); } }, b.active ? 'Turn off' : 'Turn on'),
-                    React.createElement("button", { className: "btn sm", onClick: () => setF(b) }, "Edit"),
+                    React.createElement("button", { className: "btn sm", onClick: () => open(b) }, "Edit"),
                     React.createElement("button", { className: "btn sm danger", onClick: async () => { if (confirm('Delete?')) {
                             await sb.from('ah_banners').delete().eq('id', b.id);
                             load();
@@ -3691,7 +3724,7 @@ function DevAppForm({ app, dkey, devId, onClose }) {
                 "Download link",
                 React.createElement("input", { value: f.download_url, onChange: set('download_url'), placeholder: "https://\\u2026 or upload a file \\u2193" }),
                 React.createElement("input", { type: "file", onChange: (e) => up(e.target.files[0], (u) => setF((x) => ({ ...x, download_url: u })), `dev/${devId}/files`, (h) => setF((x) => ({ ...x, sha256: h }))) }),
-                React.createElement("small", { className: "muted" }, "Up to 100 MB total across all your files.")),
+                React.createElement("small", { className: "muted" }, "Up to 100 MB per file, 300 MB total across everything you upload.")),
             React.createElement("label", { className: "full" },
                 "Extra download links / mirrors (Label | URL, one per line)",
                 React.createElement("textarea", { rows: 2, value: f.extra_links, onChange: set('extra_links') })),
