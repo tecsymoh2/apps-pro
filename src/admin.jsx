@@ -24,6 +24,40 @@ async function uploadFile(file, folder) {
   const { error } = await sb.storage.from('appshub').upload(path, file, { cacheControl: '31536000', upsert: false });
   if (error) throw error; return sb.storage.from('appshub').getPublicUrl(path).data.publicUrl;
 }
+async function uploadToCatbox(file, userhash) {
+  const form = new FormData();
+  form.append('reqtype', 'fileupload');
+  if (userhash) form.append('userhash', userhash);
+  form.append('fileToUpload', file);
+  let res;
+  try { res = await fetch('https://catbox.moe/user/api.php', { method: 'POST', body: form }); }
+  catch { throw new Error('Catbox could not be reached from the browser (it may be blocking cross-site uploads). Switch back to Supabase in Settings.'); }
+  const text = (await res.text()).trim();
+  if (!res.ok || !/^https?:\/\//.test(text)) throw new Error('Catbox rejected the upload: ' + text.slice(0, 200));
+  return text;
+}
+// This branch — and the Catbox userhash it can send — is only ever reached from this
+// admin.jsx module's OWN upload call sites (AppForm, AdminBanners), never from the shared
+// uploadFile() above that /developer accounts also call, so a developer's browser never
+// sees this admin's Catbox secret even if they share a device with an admin session.
+let ADMIN_UPLOAD_CFG = null;
+async function loadAdminUploadCfg() {
+  const [{ data: s }, { data: sec }] = await Promise.all([
+    sb.from('ah_settings').select('value').eq('key', 'file_host').maybeSingle(),
+    sb.from('ah_secrets').select('value').eq('key', 'catbox_userhash').maybeSingle(),
+  ]);
+  ADMIN_UPLOAD_CFG = { host: s?.value === 'catbox' ? 'catbox' : 'supabase', catboxHash: sec?.value || '' };
+}
+sb.auth.onAuthStateChange((event) => { if (event === 'SIGNED_OUT') ADMIN_UPLOAD_CFG = null; });
+async function adminUploadFile(file, folder) {
+  if (IMG_TYPES.includes(folder)) file = await optimizeImage(file, folder === 'icons' ? 512 : 1600);
+  const limit = ADMIN_UPLOAD_CFG?.host === 'catbox' ? 200 * 1024 * 1024 : MAX_UPLOAD;
+  if (file.size > limit) throw new Error(`File is ${(file.size / 1024 / 1024).toFixed(1)} MB — the limit is ${Math.round(limit / 1024 / 1024)} MB.`);
+  if (ADMIN_UPLOAD_CFG?.host === 'catbox') return uploadToCatbox(file, ADMIN_UPLOAD_CFG.catboxHash);
+  const path = `${folder}/${Date.now()}-${Math.random().toString(36).slice(2, 6)}-${SAFE(file.name)}`;
+  const { error } = await sb.storage.from('appshub').upload(path, file, { cacheControl: '31536000', upsert: false });
+  if (error) throw error; return sb.storage.from('appshub').getPublicUrl(path).data.publicUrl;
+}
 async function sha256File(file) { const h = await crypto.subtle.digest('SHA-256', await file.arrayBuffer()); return [...new Uint8Array(h)].map((b) => b.toString(16).padStart(2, '0')).join(''); }
 const toCSV = (rows) => { if (!rows.length) return ''; const cols = [...new Set(rows.flatMap((r) => Object.keys(r)))]; const esc = (v) => { if (v == null) return ''; v = typeof v === 'object' ? JSON.stringify(v) : String(v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }; return [cols.join(','), ...rows.map((r) => cols.map((c) => esc(r[c])).join(','))].join('\n'); };
 const saveFile = (name, text, type = 'text/csv') => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); };
@@ -89,6 +123,7 @@ const ALL_TABS = [['dash', '📊 Dashboard', 0], ['apps', '📦 Apps', 0], ['dev
 function AdminPanel({ role, session }) {
   const [tab, setTab] = useState('dash'); const owner = role === 'owner';
   const tabs = ALL_TABS.filter((t) => owner || !t[2]);
+  useEffect(() => { loadAdminUploadCfg(); }, []);
   return (<div className="wrap page"><div className="row between"><h1>Admin <span className="chip sm">{role}</span></h1><button className="btn ghost" onClick={() => sb.auth.signOut()}>Log out</button></div>
     <nav className="tabs">{tabs.map(([k, l]) => <button key={k} className={'tab' + (k === tab ? ' active' : '')} onClick={() => setTab(k)}>{l}</button>)}</nav>
     {tab === 'dash' && <AdminDash />}{tab === 'apps' && <AdminApps owner={owner} />}{tab === 'collections' && <AdminCollections />}{tab === 'reviews' && <AdminReviews />}{tab === 'comments' && <AdminComments />}
@@ -230,24 +265,27 @@ function AppForm({ app, dup, onClose }) {
 
 /* ---------- developers (see every developer and their apps) ---------- */
 function AdminDevelopers() {
-  const toast = useToast(); const [devs, setDevs] = useState(null); const [apps, setApps] = useState([]); const [open, setOpen] = useState(null); const [q, setQ] = useState('');
+  const toast = useToast(); const [devs, setDevs] = useState(null); const [apps, setApps] = useState([]); const [open, setOpen] = useState(null); const [q, setQ] = useState(''); const [newKey, setNewKey] = useState(null);
   const load = () => { sb.from('ah_developers').select('*').order('created_at', { ascending: false }).then(({ data }) => setDevs(data || [])); sb.from('ah_apps').select('id,name,slug,owner_id,downloads,is_published,broken_reports').not('owner_id', 'is', null).then(({ data }) => setApps(data || [])); };
   useEffect(() => { load(); }, []);
   if (!devs) return <Loader />;
   const appsFor = (id) => apps.filter((a) => a.owner_id === id);
-  const list = devs.filter((d) => (d.name + d.email).toLowerCase().includes(q.toLowerCase()));
-  const suspend = async (d) => { const { error } = await sb.from('ah_developers').update({ suspended: !d.suspended }).eq('id', d.id); if (error) return toast(error.message); sb.rpc('ah_log', { p_action: d.suspended ? 'unsuspend_developer' : 'suspend_developer', p_detail: d.email }).then(() => {}); toast(d.suspended ? 'Unsuspended — their apps are visible again' : 'Suspended — their apps are hidden from visitors'); load(); };
+  const list = devs.filter((d) => (d.name || '').toLowerCase().includes(q.toLowerCase()));
+  const suspend = async (d) => { const { error } = await sb.from('ah_developers').update({ suspended: !d.suspended }).eq('id', d.id); if (error) return toast(error.message); sb.rpc('ah_log', { p_action: d.suspended ? 'unsuspend_developer' : 'suspend_developer', p_detail: d.name }).then(() => {}); toast(d.suspended ? 'Unsuspended — their apps are visible again' : 'Suspended — their apps are hidden from visitors'); load(); };
+  const resetKey = async (d) => { if (!confirm(`Issue ${d.name} a new key? Their old key stops working immediately — you'll need to send them this new one yourself.`)) return; const { data, error } = await sb.rpc('ah_admin_reset_dev_key', { p_dev_id: d.id }); if (error) return toast(error.message); setNewKey({ name: d.name, key: data }); };
+  const delDev = async (d) => { if (!confirm(`Permanently delete ${d.name} and every app they published? This can't be undone.`)) return; const { error } = await sb.rpc('ah_admin_delete_dev', { p_dev_id: d.id }); if (error) return toast(error.message); toast('Deleted'); load(); };
   return (<div className="card pad"><div className="row between"><h2>Developers ({devs.length})</h2><input placeholder="Filter…" value={q} onChange={(e) => setQ(e.target.value)} /></div>
-    <p className="muted small">Anyone can sign up at <Link to="/developer">/developer</Link> to add their own apps. Suspending a developer hides all of their apps from visitors immediately.</p>
+    <p className="muted small">Anyone can get a key at <Link to="/developer">/developer</Link> (no account/email needed) to add their own apps. Suspending a developer hides all of their apps from visitors immediately.</p>
+    {newKey && <div className="alert warn" style={{ alignItems: 'flex-start', flexDirection: 'column', gap: 8 }}><b>New key for {newKey.name}</b><div className="keybox"><code>{newKey.key}</code><button className="btn sm" onClick={() => { navigator.clipboard.writeText(newKey.key); toast('Copied'); }}>Copy</button></div><p className="muted small">Send this to them yourself — it won't be shown again.</p><button className="btn sm ghost" onClick={() => setNewKey(null)}>Close</button></div>}
     {list.length ? list.map((d) => { const theirApps = appsFor(d.id); const isOpen = open === d.id; return (
       <div key={d.id} className="review">
-        <div className="row between"><div><b>{d.name || d.email.split('@')[0]}</b> <span className="muted small">{d.email}</span>{d.suspended && <span className="chip sm warnchip">suspended</span>} <span className="muted small"> · joined {timeAgo(d.created_at)}</span>{d.website && <> · <a href={safeUrl(d.website)} target="_blank" rel="noopener noreferrer">{d.website}</a></>}</div>
-          <div className="actions"><button className="btn sm ghost" onClick={() => setOpen(isOpen ? null : d.id)}>{theirApps.length} app{theirApps.length === 1 ? '' : 's'} {isOpen ? '▲' : '▼'}</button><button className={'btn sm' + (d.suspended ? '' : ' danger')} onClick={() => suspend(d)}>{d.suspended ? 'Unsuspend' : 'Suspend'}</button></div></div>
+        <div className="row between"><div><b>{d.name}</b>{d.suspended && <span className="chip sm warnchip">suspended</span>} <span className="muted small"> · joined {timeAgo(d.created_at)}{d.last_seen ? ` · last seen ${timeAgo(d.last_seen)}` : ''}</span>{d.website && <> · <a href={safeUrl(d.website)} target="_blank" rel="noopener noreferrer">{d.website}</a></>}</div>
+          <div className="actions"><button className="btn sm ghost" onClick={() => setOpen(isOpen ? null : d.id)}>{theirApps.length} app{theirApps.length === 1 ? '' : 's'} {isOpen ? '▲' : '▼'}</button><button className="btn sm ghost" onClick={() => resetKey(d)}>Reset key</button><button className={'btn sm' + (d.suspended ? '' : ' danger')} onClick={() => suspend(d)}>{d.suspended ? 'Unsuspend' : 'Suspend'}</button><button className="btn sm danger" onClick={() => delDev(d)}>Delete</button></div></div>
         {d.bio && <p className="muted small pre">{d.bio}</p>}
         {isOpen && (theirApps.length ? <div className="table-wrap" style={{ marginTop: 8 }}><table className="table"><thead><tr><th>App</th><th>Downloads</th><th>Status</th></tr></thead><tbody>
           {theirApps.map((a) => <tr key={a.id}><td><Link to={`/${a.slug}`}>{a.name}</Link></td><td>{fmtNum(a.downloads)}</td><td>{a.is_published ? 'Live' : 'Unpublished'}{a.broken_reports > 0 && <span className="chip sm warnchip">⚠ {a.broken_reports}</span>}</td></tr>)}
         </tbody></table></div> : <p className="muted small">No apps yet.</p>)}
-      </div>); }) : <Empty>No developers have signed up yet.</Empty>}</div>);
+      </div>); }) : <Empty>No developers yet.</Empty>}</div>);
 }
 
 /* ---------- managed categories ---------- */
@@ -468,8 +506,9 @@ function AdminSettings() {
   useEffect(() => { sb.from('ah_settings').select('*').then(({ data }) => setS(Object.fromEntries((data || []).map((r) => [r.key, r.value])))); sb.from('ah_secrets').select('*').then(({ data }) => setSec(Object.fromEntries((data || []).map((r) => [r.key, r.value])))); }, []);
   if (!s || !sec) return <Loader />;
   const fields = [['site_name', 'Site name'], ['tagline', 'Tagline'], ['announcement', 'Announcement bar (empty = hidden)'], ['popup_seconds', 'Seconds to wait in the download ad pop-up'], ['popup_message', 'Message in the ad pop-up'], ['donate_label', 'Donate button text'], ['donate_url', 'Donate link (PayPal, Buy Me a Coffee…)'], ['analytics_id', 'Analytics ID (GA: G-XXXXXXX, Plausible: yourdomain.com)']];
-  const nfields = [['telegram_bot_token', 'Telegram bot token'], ['telegram_chat_id', 'Telegram chat ID (alerts to you)'], ['telegram_channel_id', 'Telegram channel ID or @channel (announcements)'], ['resend_api_key', 'Resend API key (for email)'], ['notify_email_to', 'Send alerts to email'], ['notify_email_from', 'Email “from” (e.g. Appshub <alerts@yourdomain.com>)'], ['discord_webhook_url', 'Discord webhook URL'], ['slack_webhook_url', 'Slack webhook URL']];
+  const nfields = [['telegram_bot_token', 'Telegram bot token'], ['telegram_chat_id', 'Telegram chat ID (alerts to you)'], ['telegram_channel_id', 'Telegram channel ID or @channel (announcements)'], ['resend_api_key', 'Resend API key (for email)'], ['notify_email_to', 'Send alerts to email'], ['notify_email_from', 'Email “from” (e.g. Appshub <alerts@yourdomain.com>)'], ['discord_webhook_url', 'Discord webhook URL'], ['slack_webhook_url', 'Slack webhook URL'], ['catbox_userhash', 'Catbox.moe userhash (from catbox.moe/manage — optional)']];
   const saveLegal = async () => { const { error } = await sb.from('ah_settings').upsert([{ key: 'terms_content', value: s.terms_content || '' }, { key: 'privacy_content', value: s.privacy_content || '' }]); toast(error ? error.message : 'Saved'); };
+  const saveHost = async () => { const { error } = await sb.from('ah_settings').upsert({ key: 'file_host', value: s.file_host || 'supabase' }); if (error) return toast(error.message); ADMIN_UPLOAD_CFG = null; loadAdminUploadCfg(); toast('Saved'); };
   return (<div className="cols"><div><div className="card pad"><h2>Site settings</h2><form className="form" onSubmit={async (e) => { e.preventDefault(); const keys = [...fields.map((x) => x[0]), 'donate_text', 'review_mode', 'download_captcha', 'analytics_provider', 'cookie_notice']; const { error } = await sb.from('ah_settings').upsert(keys.map((k) => ({ key: k, value: s[k] || '' }))); toast(error ? error.message : 'Saved — refresh the site to see changes'); }}>
     {fields.map(([k, l]) => <label key={k}>{l}<input value={s[k] || ''} onChange={(e) => setS({ ...s, [k]: e.target.value })} /></label>)}
     <label>Donate instructions (e.g. mobile money number)<textarea rows={3} value={s.donate_text || ''} onChange={(e) => setS({ ...s, donate_text: e.target.value })} /></label>
@@ -479,10 +518,13 @@ function AdminSettings() {
     <label className="check"><input type="checkbox" checked={s.cookie_notice !== 'off'} onChange={(e) => setS({ ...s, cookie_notice: e.target.checked ? 'on' : 'off' })} /> Show a cookie consent banner when analytics is on</label>
     <button className="btn">Save settings</button></form></div>
     <div className="card pad"><h2>Terms of Service</h2><MdEditor rows={8} value={s.terms_content} onChange={(v) => setS({ ...s, terms_content: v })} /><button className="btn" style={{ marginTop: 10 }} onClick={saveLegal}>Save legal pages</button></div>
-    <div className="card pad"><h2>Privacy Policy</h2><MdEditor rows={8} value={s.privacy_content} onChange={(v) => setS({ ...s, privacy_content: v })} /><button className="btn" style={{ marginTop: 10 }} onClick={saveLegal}>Save legal pages</button></div></div>
+    <div className="card pad"><h2>Privacy Policy</h2><MdEditor rows={8} value={s.privacy_content} onChange={(v) => setS({ ...s, privacy_content: v })} /><button className="btn" style={{ marginTop: 10 }} onClick={saveLegal}>Save legal pages</button></div>
+    <div className="card pad"><h2>📦 File storage</h2><p className="muted small">Where uploaded icons, screenshots and download files go. Catbox.moe is free and has no 100 MB cap (200 MB), but its own rules say it isn’t meant for hosting files for a business/commercial site without asking them first — use at your own judgment. Set the userhash in Alerts & notifications, below.</p>
+      <select value={s.file_host || 'supabase'} onChange={(e) => setS({ ...s, file_host: e.target.value })}><option value="supabase">Supabase storage (default, 100 MB)</option><option value="catbox">Catbox.moe (200 MB, uploads from this admin session only)</option></select>
+      <button className="btn" style={{ marginTop: 10 }} onClick={saveHost}>Save file storage</button></div></div>
     <div className="card pad"><h2>🔔 Alerts & notifications</h2><p className="muted small">Instant alerts to you (Telegram/email) plus keys for announcements. Stored privately — only owners can read them.</p>
       <form className="form" onSubmit={async (e) => { e.preventDefault(); const { error } = await sb.from('ah_secrets').upsert(nfields.map(([k]) => ({ key: k, value: (sec[k] || '').trim() }))); toast(error ? error.message : 'Saved'); }}>
-        {nfields.map(([k, l]) => <label key={k}>{l}<input type={/token|key/.test(k) ? 'password' : 'text'} autoComplete="off" value={sec[k] || ''} onChange={(e) => setSec({ ...sec, [k]: e.target.value })} /></label>)}
+        {nfields.map(([k, l]) => <label key={k}>{l}<input type={/token|key|hash/.test(k) ? 'password' : 'text'} autoComplete="off" value={sec[k] || ''} onChange={(e) => setSec({ ...sec, [k]: e.target.value })} /></label>)}
         <div className="row"><button className="btn">Save</button><button type="button" className="btn ghost" onClick={async () => { const { error } = await sb.from('ah_requests').insert({ kind: 'contact', name: 'Appshub', message: 'This is a test notification 🎉' }); toast(error ? error.message : 'Test sent — check Telegram / email'); }}>Send test alert</button></div></form></div></div>);
 }
 
