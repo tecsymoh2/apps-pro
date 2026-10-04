@@ -191,7 +191,15 @@ function AdminApps({ owner }) {
 
 function AppForm({ app, dup, onClose }) {
   const toast = useToast(); const [saved, setSaved] = useState(dup ? null : app);
-  const [f, setF] = useState(() => { if (!app) return blankApp; const base = { ...blankApp, ...app, features: (app.features || []).join('\n'), extra_links: (app.extra_links || []).map((l) => `${l.label} | ${l.url}`).join('\n'), publish_at: app.publish_at ? new Date(new Date(app.publish_at).getTime() - new Date(app.publish_at).getTimezoneOffset() * 60000).toISOString().slice(0, 16) : '' }; return dup ? { ...base, name: app.name + ' (copy)', slug: app.slug + '-copy', is_published: false, is_featured: false, is_verified: false, publish_at: '' } : base; });
+  const dKey = 'ah_admin_draft:' + (dup ? 'dup-' + app.id : (app ? app.id : 'new'));
+  const [f, setF] = useState(() => {
+    const base = (() => { if (!app) return blankApp; const b = { ...blankApp, ...app, features: (app.features || []).join('\n'), extra_links: (app.extra_links || []).map((l) => `${l.label} | ${l.url}`).join('\n'), publish_at: app.publish_at ? new Date(new Date(app.publish_at).getTime() - new Date(app.publish_at).getTimezoneOffset() * 60000).toISOString().slice(0, 16) : '' }; return dup ? { ...b, name: app.name + ' (copy)', slug: app.slug + '-copy', is_published: false, is_featured: false, is_verified: false, publish_at: '' } : b; })();
+    const draft = lsGet(dKey, null);
+    return draft || base;
+  });
+  const [restored] = useState(() => !!lsGet(dKey, null));
+  useEffect(() => { if (restored) toast('Restored your unsaved draft — a reload (e.g. while picking a file) no longer loses your work'); }, []);
+  useEffect(() => { lsSet(dKey, f); }, [f]);
   const [shots, setShots] = useState([]); const [versions, setVersions] = useState([]); const [busy, setBusy] = useState(''); const [slugTouched, setSlugTouched] = useState(!!app);
   const [nv, setNv] = useState({ version: '', size: '', download_url: '', sha256: '', notes: '' }); const dragI = useRef(null);
   const [dupeWarn, setDupeWarn] = useState('');
@@ -215,7 +223,7 @@ function AppForm({ app, dup, onClose }) {
     setBusy('Saving…'); const { data, error } = await (saved ? sb.from('ah_apps').update(row).eq('id', saved.id).select().single() : sb.from('ah_apps').insert(row).select().single()); setBusy('');
     if (error) return toast(error.code === '23505' ? 'That link name is already used by another app.' : error.message);
     sb.rpc('ah_log', { p_action: saved ? 'edit_app' : 'create_app', p_detail: data.name }).then(() => {});
-    setSaved(data); setF((x) => ({ ...x, slug })); toast(saved ? 'Changes saved' : 'App created — now add screenshots and versions below');
+    setSaved(data); setF((x) => ({ ...x, slug })); try { localStorage.removeItem(dKey); } catch {} toast(saved ? 'Changes saved' : 'App created — now add screenshots and versions below');
   };
   const addShots = async (files) => { let sort = shots.length ? Math.max(...shots.map((s) => s.sort)) + 1 : 0; for (const file of files) { setBusy('Uploading ' + file.name + '…'); try { const url = await uploadFile(file, 'screenshots'); await sb.from('ah_screenshots').insert({ app_id: saved.id, url, sort: sort++ }); } catch (e) { toast('Failed: ' + e.message); } } setBusy(''); loadShots(saved.id); };
   const reorder = async (from, to) => { if (to < 0 || to >= shots.length || from === to) return; const arr = [...shots]; const [m] = arr.splice(from, 1); arr.splice(to, 0, m); setShots(arr); await Promise.all(arr.map((s, i) => sb.from('ah_screenshots').update({ sort: i }).eq('id', s.id))); };
@@ -228,7 +236,7 @@ function AppForm({ app, dup, onClose }) {
     setSaved(data); setF((x) => ({ ...x, ...patch })); setNv({ version: '', size: '', download_url: '', sha256: '', notes: '' }); loadVers(saved.id); toast('New version released — old one moved to history. Use “Announce” to notify subscribers.');
   };
   const addOld = async () => { if (!nv.version.trim() || !nv.download_url.trim()) return toast('Older version needs a version number and download link'); await sb.from('ah_versions').insert({ app_id: saved.id, ...nv }); setNv({ version: '', size: '', download_url: '', sha256: '', notes: '' }); loadVers(saved.id); toast('Added to version history'); };
-  return (<div className="card pad"><div className="row between"><h2>{saved ? `Edit ${saved.name}` : dup ? 'Duplicate app' : 'Add app'}</h2><button className="btn ghost" onClick={onClose}>← Back to apps</button></div>
+  return (<div className="card pad"><div className="row between"><h2>{saved ? `Edit ${saved.name}` : dup ? 'Duplicate app' : 'Add app'}</h2><button className="btn ghost" onClick={() => { try { localStorage.removeItem(dKey); } catch {} onClose(); }}>← Back to apps</button></div>
     {saved && <p className="muted small">Share link: <a href={appUrl(saved.slug)} target="_blank" rel="noreferrer">{appUrl(saved.slug)}</a></p>}
     {dup && !saved && <p className="muted small">Copy of “{app.name}”. Change the name, then Create. (Screenshots and versions are not copied.)</p>}
     <form className="form two" onSubmit={save}>
@@ -375,14 +383,20 @@ function AdminRequests() {
 }
 
 /* ---------- ads & banners (owner) ---------- */
+const bannerDraftKey = (id) => 'ah_admin_draft:banner-' + (id || 'new');
 function AdminBanners() {
-  const toast = useToast(); const [rows, setRows] = useState(null); const [f, setF] = useState(null); const [busy, setBusy] = useState(false);
+  const toast = useToast(); const [rows, setRows] = useState(null); const [f, setF] = useState(null); const [busy, setBusy] = useState(false); const [restoredMsg, setRestoredMsg] = useState(false);
   const load = () => sb.from('ah_banners').select('*').order('created_at', { ascending: false }).then(({ data }) => setRows(data || []));
   useEffect(() => { load(); }, []);
+  useEffect(() => { if (!f) return; lsSet(bannerDraftKey(f.id), f); }, [f]);
+  const open = (base) => { const draft = lsGet(bannerDraftKey(base.id), null); setRestoredMsg(!!draft); setF(draft || base); };
+  useEffect(() => { if (restoredMsg) { toast('Restored your unsaved draft'); setRestoredMsg(false); } }, [restoredMsg]);
+  const cancel = () => { try { localStorage.removeItem(bannerDraftKey(f.id)); } catch {} setF(null); };
   const save = async (e) => {
     e.preventDefault(); const { id, created_at, clicks, impressions, ...row } = f; row.link_url = row.link_url || null; row.image_url = row.image_url || null;
     row.starts_at = row.starts_at ? new Date(row.starts_at).toISOString() : null; row.ends_at = row.ends_at ? new Date(row.ends_at).toISOString() : null;
-    const { error } = id ? await sb.from('ah_banners').update(row).eq('id', id) : await sb.from('ah_banners').insert(row); if (error) return toast(error.message); toast('Saved'); setF(null); load();
+    const { error } = id ? await sb.from('ah_banners').update(row).eq('id', id) : await sb.from('ah_banners').insert(row); if (error) return toast(error.message);
+    try { localStorage.removeItem(bannerDraftKey(id)); } catch {} toast('Saved'); setF(null); load();
   };
   if (!rows) return <Loader />;
   if (f) return (<div className="card pad"><h2>{f.id ? 'Edit' : 'New'} banner / ad</h2><form className="form" onSubmit={save}>
@@ -392,12 +406,12 @@ function AdminBanners() {
     <label>Link when clicked (optional)<input value={f.link_url || ''} onChange={(e) => setF({ ...f, link_url: e.target.value })} placeholder="https://…" /></label>
     <div className="form two"><label>Start showing (optional)<input type="datetime-local" value={toLocalInput(f.starts_at)} onChange={(e) => setF({ ...f, starts_at: e.target.value })} /></label><label>Stop showing (optional)<input type="datetime-local" value={toLocalInput(f.ends_at)} onChange={(e) => setF({ ...f, ends_at: e.target.value })} /></label></div>
     <label className="check"><input type="checkbox" checked={f.active} onChange={(e) => setF({ ...f, active: e.target.checked })} /> Active</label>
-    <div className="row"><button className="btn" disabled={busy}>{busy ? 'Uploading…' : 'Save'}</button><button type="button" className="btn ghost" onClick={() => setF(null)}>Cancel</button></div></form></div>);
-  return (<div className="card pad"><div className="row between"><h2>Ads & banners</h2><button className="btn" onClick={() => setF({ placement: 'popup', title: '', message: '', image_url: '', link_url: '', starts_at: null, ends_at: null, active: true })}>+ New</button></div>
+    <div className="row"><button className="btn" disabled={busy}>{busy ? 'Uploading…' : 'Save'}</button><button type="button" className="btn ghost" onClick={cancel}>Cancel</button></div></form></div>);
+  return (<div className="card pad"><div className="row between"><h2>Ads & banners</h2><button className="btn" onClick={() => open({ placement: 'popup', title: '', message: '', image_url: '', link_url: '', starts_at: null, ends_at: null, active: true })}>+ New</button></div>
     <p className="muted small">Pop-up ads appear before every download (a random live one is shown). With none live, downloads start immediately.</p>
     {rows.length ? rows.map((b) => { const live = isLive(b); return (<div key={b.id} className="review row between"><div className="row">{b.image_url && <img className="thumb" src={b.image_url} alt="" />}<div><b>{b.title}</b> <span className="chip sm">{b.placement}</span> <span className={'chip sm' + (live ? '' : ' warnchip')}>{live ? 'live' : b.active ? 'scheduled/expired' : 'off'}</span>
       <p className="muted small">{b.message}</p><p className="small">👁 {fmtNum(b.impressions)} · 🖱 {fmtNum(b.clicks)} · CTR {b.impressions ? ((b.clicks / b.impressions) * 100).toFixed(1) : 0}%{b.starts_at && ` · from ${new Date(b.starts_at).toLocaleDateString()}`}{b.ends_at && ` · until ${new Date(b.ends_at).toLocaleDateString()}`}</p></div></div>
-      <div className="actions"><button className="btn sm ghost" onClick={async () => { await sb.from('ah_banners').update({ active: !b.active }).eq('id', b.id); load(); }}>{b.active ? 'Turn off' : 'Turn on'}</button><button className="btn sm" onClick={() => setF(b)}>Edit</button><button className="btn sm danger" onClick={async () => { if (confirm('Delete?')) { await sb.from('ah_banners').delete().eq('id', b.id); load(); } }}>Delete</button></div></div>); }) : <Empty>No banners yet.</Empty>}</div>);
+      <div className="actions"><button className="btn sm ghost" onClick={async () => { await sb.from('ah_banners').update({ active: !b.active }).eq('id', b.id); load(); }}>{b.active ? 'Turn off' : 'Turn on'}</button><button className="btn sm" onClick={() => open(b)}>Edit</button><button className="btn sm danger" onClick={async () => { if (confirm('Delete?')) { await sb.from('ah_banners').delete().eq('id', b.id); load(); } }}>Delete</button></div></div>); }) : <Empty>No banners yet.</Empty>}</div>);
 }
 
 /* ---------- announcements: push + email + Telegram channel ---------- */
