@@ -94,6 +94,15 @@ function StarInput({ value, onChange }) {
 }
 const Loader = () => <div className="loader"><div className="spin" /></div>;
 const Empty = ({ children }) => <div className="empty">{children}</div>;
+function QR({ text, size = 160 }) {
+  const ref = useRef(); const boxRef = useRef();
+  useEffect(() => {
+    if (!window.QRCode || !ref.current) return;
+    ref.current.innerHTML = '';
+    try { boxRef.current = new window.QRCode(ref.current, { text, width: size, height: size, correctLevel: window.QRCode.CorrectLevel.M }); } catch {}
+  }, [text, size]);
+  return <div ref={ref} className="qr-box" style={{ width: size, height: size }} />;
+}
 const Verified = () => <span className="verified" title="Verified by Appshub"><Ico n="ok" s={16} /></span>;
 const Rate = ({ app }) => app.review_count > 0 ? <span className="rate">{app.avg_rating} <Ico n="star" s={11} /></span> : <span className="rate muted">New</span>;
 

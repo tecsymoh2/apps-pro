@@ -29,11 +29,11 @@ function DeveloperPortal() {
 
 function DevKeyGate({ onKey }) {
   const toast = useToast(); const [mode, setMode] = useState('new');
-  const [name, setName] = useState(''); const [site, setSite] = useState(''); const [pasted, setPasted] = useState('');
+  const [name, setName] = useState(''); const [site, setSite] = useState(''); const [email, setEmail] = useState(''); const [pasted, setPasted] = useState('');
   const [busy, setBusy] = useState(false); const [err, setErr] = useState(''); const [issued, setIssued] = useState(''); const [saved, setSaved] = useState(false);
   const register = async (e) => {
     e.preventDefault(); setBusy(true); setErr('');
-    const { data, error } = await sb.rpc('ah_dev_register', { p_name: name.trim(), p_website: site.trim() });
+    const { data, error } = await sb.rpc('ah_dev_register', { p_name: name.trim(), p_website: site.trim(), p_email: email.trim() });
     setBusy(false); if (error) return setErr(error.message.replace(/^.*?:\s*/, ''));
     setIssued(data.key);
   };
@@ -45,7 +45,9 @@ function DevKeyGate({ onKey }) {
   };
   if (issued) return (<div className="wrap page"><div className="card pad narrow"><h2>\ud83d\udd11 Your developer key</h2>
     <div className="alert warn"><Ico n="warn" s={18} /> Save this somewhere safe now. It will not be shown again, there's no email tied to it, and anyone with it can manage your apps.</div>
+    <div className="row" style={{ justifyContent: 'center', margin: '10px 0' }}><QR text={issued} /></div>
     <div className="keybox"><code>{issued}</code><button type="button" className="btn sm" onClick={() => { navigator.clipboard.writeText(issued); toast('Copied'); }}>Copy</button></div>
+    <p className="muted small center">Scan the code to save your key on your phone, or copy it as text.</p>
     <label className="check" style={{ marginTop: 14 }}><input type="checkbox" checked={saved} onChange={(e) => setSaved(e.target.checked)} /> I've saved my key somewhere safe</label>
     <button className="btn big" style={{ marginTop: 10 }} disabled={!saved} onClick={() => onKey(issued)}>Continue to my dashboard</button></div></div>);
   return (<div className="wrap page"><div className="card pad narrow"><h2>\ud83d\udc69\u200d\ud83d\udcbb Developer portal</h2><p className="muted">No account or email needed \u2014 add your own apps to Appshub with just a key.</p>
@@ -53,6 +55,7 @@ function DevKeyGate({ onKey }) {
     {mode === 'new' ? (<form className="form" onSubmit={register}>
       <label>Your name<input required minLength={2} maxLength={80} value={name} onChange={(e) => setName(e.target.value)} /></label>
       <label>Website (optional)<input type="url" maxLength={300} value={site} onChange={(e) => setSite(e.target.value)} placeholder="https://\u2026" /></label>
+      <label>Email (optional)<input type="email" maxLength={200} value={email} onChange={(e) => setEmail(e.target.value)} placeholder="only used if you ever lose your key" /></label>
       {err && <div className="alert">{err}</div>}<button className="btn" disabled={busy}>{busy ? 'Please wait\u2026' : 'Get my key'}</button></form>) : (
       <form className="form" onSubmit={useExisting}><label>Paste your key<input required value={pasted} onChange={(e) => setPasted(e.target.value)} placeholder="ahk_\u2026" autoComplete="off" /></label>
         {err && <div className="alert">{err}</div>}<button className="btn" disabled={busy}>{busy ? 'Checking\u2026' : 'Continue'}</button></form>)}
@@ -86,12 +89,13 @@ function DevDashboard({ me, dkey, onKey, onLogout }) {
 }
 
 function DevProfileForm({ me, dkey }) {
-  const toast = useToast(); const [name, setName] = useState(me.name || ''); const [bio, setBio] = useState(me.bio || ''); const [site, setSite] = useState(me.website || ''); const [busy, setBusy] = useState(false);
-  const save = async (e) => { e.preventDefault(); setBusy(true); const { error } = await sb.rpc('ah_dev_update_profile', { p_key: dkey, p_name: name, p_bio: bio, p_website: site }); setBusy(false); if (error) return toast(error.message.replace(/^.*?:\s*/, '')); toast('Saved'); };
+  const toast = useToast(); const [name, setName] = useState(me.name || ''); const [bio, setBio] = useState(me.bio || ''); const [site, setSite] = useState(me.website || ''); const [email, setEmail] = useState(me.email || ''); const [busy, setBusy] = useState(false);
+  const save = async (e) => { e.preventDefault(); setBusy(true); const { error } = await sb.rpc('ah_dev_update_profile', { p_key: dkey, p_name: name, p_bio: bio, p_website: site, p_email: email.trim() }); setBusy(false); if (error) return toast(error.message.replace(/^.*?:\s*/, '')); toast('Saved'); };
   return (<div className="card pad narrow"><h2>Your developer profile</h2><p className="muted small">Shown to Appshub admins. \u201cOffered by\u201d on your app pages uses the developer name you set per app.</p>
     <form className="form" onSubmit={save}><label>Display name<input required minLength={2} value={name} onChange={(e) => setName(e.target.value)} maxLength={80} /></label>
       <label>Bio<textarea rows={3} value={bio} onChange={(e) => setBio(e.target.value)} maxLength={1000} /></label>
       <label>Website<input type="url" value={site} onChange={(e) => setSite(e.target.value)} placeholder="https://\u2026" maxLength={300} /></label>
+      <label>Email (optional, only used if you lose your key)<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} maxLength={200} /></label>
       <button className="btn" disabled={busy}>{busy ? 'Saving\u2026' : 'Save profile'}</button></form></div>);
 }
 
@@ -101,6 +105,7 @@ function DevKeyPanel({ dkey, onKey, onLogout }) {
   const del_ = async () => { if (del !== 'DELETE') return; if (!confirm('This permanently deletes your account and every app you published. Continue?')) return; setBusy(true); const { error } = await sb.rpc('ah_dev_delete_account', { p_key: dkey }); setBusy(false); if (error) return toast(error.message); onLogout(); };
   return (<div className="cols"><div className="card pad"><h2>\ud83d\udd11 My key</h2><p className="muted small">This key is how you get back into your apps \u2014 there's no email or password recovery.</p>
     <div className="keybox">{show ? <code>{dkey}</code> : <code>\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022</code>}<button type="button" className="btn sm ghost" onClick={() => setShow(!show)}>{show ? 'Hide' : 'Show'}</button><button type="button" className="btn sm" onClick={() => { navigator.clipboard.writeText(dkey); toast('Copied'); }}>Copy</button></div>
+    {show && <div className="row" style={{ justifyContent: 'center', margin: '10px 0' }}><QR text={dkey} size={140} /></div>}
     <button className="btn ghost" style={{ marginTop: 12 }} disabled={busy} onClick={rotate}>Generate a new key</button></div>
     <div className="card pad"><h2>\u26a0\ufe0f Danger zone</h2><p className="muted small">Deletes your profile and every app you've published. This cannot be undone.</p>
       <div className="form"><label>Type DELETE to confirm<input value={del} onChange={(e) => setDel(e.target.value)} /></label><button className="btn danger" disabled={del !== 'DELETE' || busy} onClick={del_}>Delete my account</button></div></div></div>);
@@ -167,6 +172,10 @@ function DevAppForm({ app, dkey, devId, onClose }) {
   const [restored] = useState(() => !!lsGet(dKey, null));
   useEffect(() => { if (restored) toast('Restored your unsaved draft'); }, []);
   useEffect(() => { lsSet(dKey, f); }, [f]);
+  const [dirty, setDirty] = useState(() => restored);
+  const mountedRef = useRef(false);
+  useEffect(() => { if (mountedRef.current) setDirty(true); else mountedRef.current = true; }, [f]);
+  useEffect(() => { const h = (e) => { if (!dirty) return; e.preventDefault(); e.returnValue = ''; }; addEventListener('beforeunload', h); return () => removeEventListener('beforeunload', h); }, [dirty]);
   const [shots, setShots] = useState([]); const [versions, setVersions] = useState([]); const [busy, setBusy] = useState(''); const [slugTouched, setSlugTouched] = useState(!!app);
   const [nv, setNv] = useState({ version: '', size: '', download_url: '', sha256: '', notes: '' }); const dragI = useRef(null);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value });
@@ -174,16 +183,16 @@ function DevAppForm({ app, dkey, devId, onClose }) {
   const loadVers = (id) => sb.from('ah_versions').select('*').eq('app_id', id).order('created_at', { ascending: false }).then(({ data }) => setVersions(data || []));
   useEffect(() => { if (saved) { loadShots(saved.id); loadVers(saved.id); } }, [saved?.id]);
   const onName = (e) => { const name = e.target.value; setF({ ...f, name, slug: slugTouched ? f.slug : slugify(name) }); };
-  const up = async (file, apply, folder, hashTo) => { if (!file) return; setBusy('Uploading ' + file.name + '\u2026'); try { let fx = file; if (folder.includes('icons') || folder.includes('screenshots')) fx = await optimizeImage(file, folder.includes('icons') ? 512 : 1600); apply(await uploadFile(fx, folder)); if (hashTo) hashTo(await sha256File(file)); toast('Uploaded'); } catch (e) { toast('Upload failed: ' + e.message); } setBusy(''); };
+  const up = async (file, apply, folder, hashTo) => { if (!file) return; setBusy('Uploading ' + file.name + '\u2026 0%'); try { let fx = file; if (folder.includes('icons') || folder.includes('screenshots')) fx = await optimizeImage(file, folder.includes('icons') ? 512 : 1600); apply(await uploadFile(fx, folder, (p) => setBusy('Uploading ' + file.name + '\u2026 ' + p + '%'))); if (hashTo) hashTo(await sha256File(file)); toast('Uploaded'); } catch (e) { toast('Upload failed: ' + e.message); } setBusy(''); };
   const save = async (e) => {
     e.preventDefault();
     const row = { name: f.name.trim(), slug: slugify(f.slug || f.name), icon_url: f.icon_url || '', short_desc: f.short_desc, about: f.about, features: lines(f.features), category: f.category.trim() || 'General', developer: f.developer, version: f.version, size: f.size, platform: f.platform, content_rating: f.content_rating, download_url: f.download_url.trim(), sha256: f.sha256 || '', extra_links: lines(f.extra_links).map((l) => { const [label, ...u] = l.split('|'); return { label: (label || '').trim() || 'Mirror', url: u.join('|').trim() }; }), whats_new: f.whats_new, seo_keywords: f.seo_keywords || '', seo_description: f.seo_description || '', is_published: f.is_published };
     setBusy('Saving\u2026'); const { data, error } = await sb.rpc('ah_dev_save_app', { p_key: dkey, p_id: saved?.id || null, p_data: row }); setBusy('');
     if (error) return toast(error.message.replace(/^.*?:\s*/, ''));
-    setSaved(data); setF((x) => ({ ...x, slug: data.slug })); try { localStorage.removeItem(dKey); } catch {}
+    setSaved(data); setF((x) => ({ ...x, slug: data.slug })); setDirty(false); try { localStorage.removeItem(dKey); } catch {}
     toast(saved ? 'Changes saved' : 'App created \u2014 add a screenshot below, then publish it');
   };
-  const addShots = async (files) => { for (const file of files) { setBusy('Uploading ' + file.name + '\u2026'); try { const small = await optimizeImage(file, 1600); const url = await uploadFile(small, `dev/${devId}/screenshots`); const { error } = await sb.rpc('ah_dev_add_shot', { p_key: dkey, p_app_id: saved.id, p_url: url }); if (error) throw error; } catch (e) { toast('Failed: ' + e.message); } } setBusy(''); loadShots(saved.id); };
+  const addShots = async (files) => { for (const file of files) { setBusy('Uploading ' + file.name + '\u2026 0%'); try { const small = await optimizeImage(file, 1600); const url = await uploadFile(small, `dev/${devId}/screenshots`, (p) => setBusy('Uploading ' + file.name + '\u2026 ' + p + '%')); const { error } = await sb.rpc('ah_dev_add_shot', { p_key: dkey, p_app_id: saved.id, p_url: url }); if (error) throw error; } catch (e) { toast('Failed: ' + e.message); } } setBusy(''); loadShots(saved.id); };
   const delShot = async (s) => { await sb.rpc('ah_dev_delete_shot', { p_key: dkey, p_id: s.id }); loadShots(saved.id); };
   const reorder = async (from, to) => { if (to < 0 || to >= shots.length || from === to) return; const arr = [...shots]; const [m] = arr.splice(from, 1); arr.splice(to, 0, m); setShots(arr); await sb.rpc('ah_dev_reorder_shots', { p_key: dkey, p_app_id: saved.id, p_ids: arr.map((s) => s.id) }); };
   const releaseNew = async () => { const { data, error } = await sb.rpc('ah_dev_release_version', { p_key: dkey, p_app_id: saved.id, p_version: nv.version, p_size: nv.size, p_download_url: nv.download_url, p_sha256: nv.sha256, p_notes: nv.notes }); if (error) return toast(error.message.replace(/^.*?:\s*/, '')); setSaved(data); setF((x) => ({ ...x, version: data.version, size: data.size, download_url: data.download_url, whats_new: data.whats_new })); setNv({ version: '', size: '', download_url: '', sha256: '', notes: '' }); loadVers(saved.id); toast('New version released \u2014 old one moved to history'); };
@@ -205,7 +214,8 @@ function DevAppForm({ app, dkey, devId, onClose }) {
       <label className="full">Extra download links / mirrors (Label | URL, one per line)<textarea rows={2} value={f.extra_links} onChange={set('extra_links')} /></label>
       <label className="full">SEO description<input value={f.seo_description || ''} onChange={set('seo_description')} maxLength={200} /></label>
       <label className="check"><input type="checkbox" checked={f.is_published} onChange={set('is_published')} /> Published (visible to visitors)</label>
-      <div className="full row"><button className="btn" disabled={!!busy}>{saved ? 'Save changes' : 'Create app'}</button>{busy && <span className="muted">{busy}</span>}</div></form>
+      <div className="full row"><button className="btn" disabled={!!busy}>{saved ? 'Save changes' : 'Create app'}</button>{busy && <span className="muted">{busy}</span>}</div>
+      {/\s(\d{1,3})%$/.test(busy || '') && <div className="full"><div className="progress"><i style={{ width: busy.match(/(\d{1,3})%$/)[1] + '%' }} /></div></div>}</form>
     {saved && <><hr /><h3>Screenshots <span className="muted small">(\u25c0 \u25b6 to reorder)</span></h3><input type="file" accept="image/*" multiple onChange={(e) => { addShots([...e.target.files]); e.target.value = ''; }} />
       <div className="shots-admin">{shots.map((s, i) => <div key={s.id}><img src={s.url} alt="" /><div className="row"><button className="btn sm ghost" onClick={() => reorder(i, i - 1)}>\u25c0</button><button className="btn sm ghost" onClick={() => reorder(i, i + 1)}>\u25b6</button><button className="btn sm danger" onClick={() => delShot(s)}>\u2715</button></div></div>)}</div>
       <hr /><h3>Version history</h3><p className="muted small">Current version: <b>{saved.version}</b>.</p>

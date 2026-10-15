@@ -17,24 +17,41 @@ async function optimizeImage(file, maxDim) {
     return new File([blob], file.name.replace(/\.[^.]+$/, '') + '.webp', { type: 'image/webp' });
   } catch { return file; } // unsupported browser — fall back to the original file
 }
-async function uploadFile(file, folder) {
+// Raw XHR (instead of supabase-js's fetch-based .upload()) so we can report real
+// upload progress — supabase-js has no progress callback for storage uploads.
+function uploadToSupabaseXHR(file, folder, onProgress) {
+  return new Promise((resolve, reject) => {
+    const path = `${folder}/${Date.now()}-${Math.random().toString(36).slice(2, 6)}-${SAFE(file.name)}`;
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${SB_URL}/storage/v1/object/appshub/${path}`);
+    xhr.setRequestHeader('apikey', SB_KEY);
+    xhr.setRequestHeader('Authorization', `Bearer ${SB_KEY}`);
+    xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+    xhr.setRequestHeader('x-upsert', 'false');
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100)); };
+    xhr.onload = () => { if (xhr.status >= 200 && xhr.status < 300) resolve(`${SB_URL}/storage/v1/object/public/appshub/${path}`); else reject(new Error('Upload failed (' + xhr.status + ')')); };
+    xhr.onerror = () => reject(new Error('Upload failed — check your connection.'));
+    xhr.send(file);
+  });
+}
+function uploadToCatboxXHR(file, userhash, onProgress) {
+  return new Promise((resolve, reject) => {
+    const form = new FormData();
+    form.append('reqtype', 'fileupload');
+    if (userhash) form.append('userhash', userhash);
+    form.append('fileToUpload', file);
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', 'https://catbox.moe/user/api.php');
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100)); };
+    xhr.onload = () => { const text = (xhr.responseText || '').trim(); if (xhr.status >= 200 && xhr.status < 300 && /^https?:\/\//.test(text)) resolve(text); else reject(new Error('Catbox rejected the upload: ' + text.slice(0, 200))); };
+    xhr.onerror = () => reject(new Error('Catbox could not be reached from the browser. Switch back to Supabase in Settings.'));
+    xhr.send(form);
+  });
+}
+async function uploadFile(file, folder, onProgress) {
   if (IMG_TYPES.includes(folder)) file = await optimizeImage(file, folder === 'icons' ? 512 : 1600);
   if (file.size > MAX_UPLOAD) throw new Error(`File is ${(file.size / 1024 / 1024).toFixed(1)} MB — the limit is 100 MB.`);
-  const path = `${folder}/${Date.now()}-${Math.random().toString(36).slice(2, 6)}-${SAFE(file.name)}`;
-  const { error } = await sb.storage.from('appshub').upload(path, file, { cacheControl: '31536000', upsert: false });
-  if (error) throw error; return sb.storage.from('appshub').getPublicUrl(path).data.publicUrl;
-}
-async function uploadToCatbox(file, userhash) {
-  const form = new FormData();
-  form.append('reqtype', 'fileupload');
-  if (userhash) form.append('userhash', userhash);
-  form.append('fileToUpload', file);
-  let res;
-  try { res = await fetch('https://catbox.moe/user/api.php', { method: 'POST', body: form }); }
-  catch { throw new Error('Catbox could not be reached from the browser (it may be blocking cross-site uploads). Switch back to Supabase in Settings.'); }
-  const text = (await res.text()).trim();
-  if (!res.ok || !/^https?:\/\//.test(text)) throw new Error('Catbox rejected the upload: ' + text.slice(0, 200));
-  return text;
+  return uploadToSupabaseXHR(file, folder, onProgress);
 }
 // This branch — and the Catbox userhash it can send — is only ever reached from this
 // admin.jsx module's OWN upload call sites (AppForm, AdminBanners), never from the shared
@@ -49,14 +66,12 @@ async function loadAdminUploadCfg() {
   ADMIN_UPLOAD_CFG = { host: s?.value === 'catbox' ? 'catbox' : 'supabase', catboxHash: sec?.value || '' };
 }
 sb.auth.onAuthStateChange((event) => { if (event === 'SIGNED_OUT') ADMIN_UPLOAD_CFG = null; });
-async function adminUploadFile(file, folder) {
+async function adminUploadFile(file, folder, onProgress) {
   if (IMG_TYPES.includes(folder)) file = await optimizeImage(file, folder === 'icons' ? 512 : 1600);
   const limit = ADMIN_UPLOAD_CFG?.host === 'catbox' ? 200 * 1024 * 1024 : MAX_UPLOAD;
   if (file.size > limit) throw new Error(`File is ${(file.size / 1024 / 1024).toFixed(1)} MB — the limit is ${Math.round(limit / 1024 / 1024)} MB.`);
-  if (ADMIN_UPLOAD_CFG?.host === 'catbox') return uploadToCatbox(file, ADMIN_UPLOAD_CFG.catboxHash);
-  const path = `${folder}/${Date.now()}-${Math.random().toString(36).slice(2, 6)}-${SAFE(file.name)}`;
-  const { error } = await sb.storage.from('appshub').upload(path, file, { cacheControl: '31536000', upsert: false });
-  if (error) throw error; return sb.storage.from('appshub').getPublicUrl(path).data.publicUrl;
+  if (ADMIN_UPLOAD_CFG?.host === 'catbox') return uploadToCatboxXHR(file, ADMIN_UPLOAD_CFG.catboxHash, onProgress);
+  return uploadToSupabaseXHR(file, folder, onProgress);
 }
 async function sha256File(file) { const h = await crypto.subtle.digest('SHA-256', await file.arrayBuffer()); return [...new Uint8Array(h)].map((b) => b.toString(16).padStart(2, '0')).join(''); }
 const toCSV = (rows) => { if (!rows.length) return ''; const cols = [...new Set(rows.flatMap((r) => Object.keys(r)))]; const esc = (v) => { if (v == null) return ''; v = typeof v === 'object' ? JSON.stringify(v) : String(v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }; return [cols.join(','), ...rows.map((r) => cols.map((c) => esc(r[c])).join(','))].join('\n'); };
@@ -170,23 +185,27 @@ function AdminDash() {
 /* ---------- apps ---------- */
 const blankApp = { name: '', slug: '', icon_url: '', short_desc: '', about: '', features: '', category: 'General', developer: '', version: '1.0', size: '', platform: 'Android', content_rating: 'Everyone', download_url: '', sha256: '', extra_links: '', whats_new: '', seo_keywords: '', seo_description: '', is_featured: false, is_published: true, is_verified: false, publish_at: '' };
 function AdminApps({ owner }) {
-  const toast = useToast(); const [apps, setApps] = useState(null); const [edit, setEdit] = useState(null); const [q, setQ] = useState(''); const [sel, setSel] = useState([]);
+  const toast = useToast(); const [apps, setApps] = useState(null); const [edit, setEdit] = useState(null); const [q, setQ] = useState(''); const [sel, setSel] = useState([]); const [flt, setFlt] = useState('all');
   const load = () => sb.from('ah_apps').select('*').order('created_at', { ascending: false }).then(({ data }) => setApps(data || []));
   useEffect(() => { load(); }, []);
   const del = async (ids) => { if (!confirm(`Delete ${ids.length} app(s)? Reviews and screenshots go too.`)) return; const { error } = await sb.from('ah_apps').delete().in('id', ids); if (error) toast(error.message); else { sb.rpc('ah_log', { p_action: 'delete_app', p_detail: ids.length + ' app(s)' }).then(() => {}); toast('Deleted'); setSel([]); load(); } };
   const bulk = async (patch) => { const { error } = await sb.from('ah_apps').update(patch).in('id', sel); if (error) toast(error.message); else { toast('Updated ' + sel.length + ' app(s)'); setSel([]); load(); } };
+  const approve = async (a, ok) => { const { error } = await sb.from('ah_apps').update({ dev_approved: ok }).eq('id', a.id); if (error) return toast(error.message); sb.rpc('ah_log', { p_action: ok ? 'approve_dev_app' : 'reject_dev_app', p_detail: a.name }).then(() => {}); toast(ok ? 'Approved — now visible to visitors' : 'Rejected — stays hidden'); load(); };
   if (edit) return <AppForm app={edit === 'new' ? null : edit.dup ? edit.app : edit} dup={edit.dup} onClose={() => { setEdit(null); load(); }} />;
   if (!apps) return <Loader />;
-  const list = apps.filter((a) => a.name.toLowerCase().includes(q.toLowerCase())); const allOn = list.length > 0 && list.every((a) => sel.includes(a.id));
+  const pending = apps.filter((a) => a.owner_id && !a.dev_approved);
+  const list = apps.filter((a) => a.name.toLowerCase().includes(q.toLowerCase())).filter((a) => flt === 'all' || (flt === 'pending' && a.owner_id && !a.dev_approved));
+  const allOn = list.length > 0 && list.every((a) => sel.includes(a.id));
   return (<div className="card pad"><div className="row between"><h2>Apps ({apps.length})</h2><div className="row"><input placeholder="Filter…" value={q} onChange={(e) => setQ(e.target.value)} /><button className="btn" onClick={() => setEdit('new')}>+ Add app</button></div></div>
+    <div className="chips"><button className={'chip' + (flt === 'all' ? ' active' : '')} onClick={() => setFlt('all')}>All</button><button className={'chip' + (flt === 'pending' ? ' active' : '')} onClick={() => setFlt('pending')}>Pending review {pending.length > 0 && `(${pending.length})`}</button></div>
     {sel.length > 0 && <div className="bulk row"><b>{sel.length} selected</b><button className="btn sm" onClick={() => bulk({ is_published: true })}>Publish</button><button className="btn sm ghost" onClick={() => bulk({ is_published: false })}>Hide</button><button className="btn sm ghost" onClick={() => bulk({ is_featured: true })}>Feature</button><button className="btn sm ghost" onClick={() => bulk({ is_verified: true })}>Verify</button>{owner && <button className="btn sm danger" onClick={() => del(sel)}>Delete</button>}</div>}
     {!apps.length && !q && <div className="wizard card pad"><h3>👋 Welcome to Appshub</h3><p className="muted">You have no apps yet. Add your first one to get your store started — you can add screenshots, set the download link, and publish it whenever you’re ready.</p><button className="btn big" onClick={() => setEdit('new')}>+ Add your first app</button></div>}
     {list.length ? <div className="table-wrap"><table className="table"><thead><tr><th><input type="checkbox" checked={allOn} onChange={() => setSel(allOn ? [] : list.map((a) => a.id))} /></th><th>App</th><th>Ver.</th><th>Downloads</th><th>Views</th><th>Status</th><th></th></tr></thead><tbody>
       {list.map((a) => <tr key={a.id}><td><input type="checkbox" checked={sel.includes(a.id)} onChange={() => setSel(sel.includes(a.id) ? sel.filter((x) => x !== a.id) : [...sel, a.id])} /></td>
         <td><div className="row"><Icon app={a} size={36} /><div><b>{a.name}</b> {a.is_verified && <Verified />}<div className="muted small">/{a.slug}</div></div></div></td><td>{a.version}</td><td>{fmtNum(a.downloads)}</td><td>{fmtNum(a.views)}</td>
-        <td>{a.is_published ? 'Live' : 'Hidden'}{a.is_featured && ' ⭐'}{a.broken_reports > 0 && <span className="chip sm warnchip">⚠ {a.broken_reports}</span>}</td>
-        <td className="actions">{a.broken_reports > 0 && <button className="btn sm ghost" onClick={async () => { await sb.from('ah_apps').update({ broken_reports: 0 }).eq('id', a.id); load(); }}>Clear reports</button>}<button className="btn sm ghost" onClick={() => { navigator.clipboard.writeText(appUrl(a.slug)); toast('Share link copied'); }}>Copy link</button><button className="btn sm ghost" onClick={() => setEdit({ dup: true, app: a })}>Duplicate</button><button className="btn sm" onClick={() => setEdit(a)}>Edit</button>{owner && <button className="btn sm danger" onClick={() => del([a.id])}>Delete</button>}</td></tr>)}
-    </tbody></table></div> : <Empty>No apps yet. Click “Add app” to publish your first one.</Empty>}</div>);
+        <td>{a.owner_id && !a.dev_approved ? <span className="chip sm warnchip">Pending review</span> : a.is_published ? 'Live' : 'Hidden'}{a.is_featured && ' ⭐'}{a.broken_reports > 0 && <span className="chip sm warnchip">⚠ {a.broken_reports}</span>}</td>
+        <td className="actions">{a.owner_id && !a.dev_approved && <><button className="btn sm" onClick={() => approve(a, true)}>Approve</button><button className="btn sm danger" onClick={() => approve(a, false)}>Reject</button></>}{a.broken_reports > 0 && <button className="btn sm ghost" onClick={async () => { await sb.from('ah_apps').update({ broken_reports: 0 }).eq('id', a.id); load(); }}>Clear reports</button>}<button className="btn sm ghost" onClick={() => { navigator.clipboard.writeText(appUrl(a.slug)); toast('Share link copied'); }}>Copy link</button><button className="btn sm ghost" onClick={() => setEdit({ dup: true, app: a })}>Duplicate</button><button className="btn sm" onClick={() => setEdit(a)}>Edit</button>{owner && <button className="btn sm danger" onClick={() => del([a.id])}>Delete</button>}</td></tr>)}
+    </tbody></table></div> : <Empty>{flt === 'pending' ? 'Nothing waiting for review.' : 'No apps yet. Click “Add app” to publish your first one.'}</Empty>}</div>);
 }
 
 function AppForm({ app, dup, onClose }) {
@@ -200,6 +219,10 @@ function AppForm({ app, dup, onClose }) {
   const [restored] = useState(() => !!lsGet(dKey, null));
   useEffect(() => { if (restored) toast('Restored your unsaved draft — a reload (e.g. while picking a file) no longer loses your work'); }, []);
   useEffect(() => { lsSet(dKey, f); }, [f]);
+  const [dirty, setDirty] = useState(() => restored);
+  const mountedRef = useRef(false);
+  useEffect(() => { if (mountedRef.current) setDirty(true); else mountedRef.current = true; }, [f]);
+  useEffect(() => { const h = (e) => { if (!dirty) return; e.preventDefault(); e.returnValue = ''; }; addEventListener('beforeunload', h); return () => removeEventListener('beforeunload', h); }, [dirty]);
   const [shots, setShots] = useState([]); const [versions, setVersions] = useState([]); const [busy, setBusy] = useState(''); const [slugTouched, setSlugTouched] = useState(!!app);
   const [nv, setNv] = useState({ version: '', size: '', download_url: '', sha256: '', notes: '' }); const dragI = useRef(null);
   const [dupeWarn, setDupeWarn] = useState('');
@@ -213,7 +236,7 @@ function AppForm({ app, dup, onClose }) {
   const loadVers = (id) => sb.from('ah_versions').select('*').eq('app_id', id).order('created_at', { ascending: false }).then(({ data }) => setVersions(data || []));
   useEffect(() => { if (saved) { loadShots(saved.id); loadVers(saved.id); } }, [saved?.id]);
   const onName = (e) => { const name = e.target.value; setF({ ...f, name, slug: slugTouched ? f.slug : slugify(name) }); };
-  const up = async (file, apply, folder, hashTo) => { if (!file) return; setBusy('Uploading ' + file.name + '…'); try { apply(await uploadFile(file, folder)); if (hashTo) { setBusy('Calculating checksum…'); hashTo(await sha256File(file)); } toast('Uploaded'); } catch (e) { toast('Upload failed: ' + e.message); } setBusy(''); };
+  const up = async (file, apply, folder, hashTo) => { if (!file) return; setBusy('Uploading ' + file.name + '… 0%'); try { apply(await adminUploadFile(file, folder, (p) => setBusy('Uploading ' + file.name + '… ' + p + '%'))); if (hashTo) { setBusy('Calculating checksum…'); hashTo(await sha256File(file)); } toast('Uploaded'); } catch (e) { toast('Upload failed: ' + e.message); } setBusy(''); };
   const hashOnly = async (file, apply) => { if (!file) return; setBusy('Calculating checksum…'); try { apply(await sha256File(file)); toast('Checksum filled in'); } catch (e) { toast(e.message); } setBusy(''); };
   const save = async (e) => {
     e.preventDefault(); const slug = slugify(f.slug || f.name);
@@ -223,9 +246,9 @@ function AppForm({ app, dup, onClose }) {
     setBusy('Saving…'); const { data, error } = await (saved ? sb.from('ah_apps').update(row).eq('id', saved.id).select().single() : sb.from('ah_apps').insert(row).select().single()); setBusy('');
     if (error) return toast(error.code === '23505' ? 'That link name is already used by another app.' : error.message);
     sb.rpc('ah_log', { p_action: saved ? 'edit_app' : 'create_app', p_detail: data.name }).then(() => {});
-    setSaved(data); setF((x) => ({ ...x, slug })); try { localStorage.removeItem(dKey); } catch {} toast(saved ? 'Changes saved' : 'App created — now add screenshots and versions below');
+    setSaved(data); setF((x) => ({ ...x, slug })); setDirty(false); try { localStorage.removeItem(dKey); } catch {} toast(saved ? 'Changes saved' : 'App created — now add screenshots and versions below');
   };
-  const addShots = async (files) => { let sort = shots.length ? Math.max(...shots.map((s) => s.sort)) + 1 : 0; for (const file of files) { setBusy('Uploading ' + file.name + '…'); try { const url = await uploadFile(file, 'screenshots'); await sb.from('ah_screenshots').insert({ app_id: saved.id, url, sort: sort++ }); } catch (e) { toast('Failed: ' + e.message); } } setBusy(''); loadShots(saved.id); };
+  const addShots = async (files) => { let sort = shots.length ? Math.max(...shots.map((s) => s.sort)) + 1 : 0; for (const file of files) { setBusy('Uploading ' + file.name + '… 0%'); try { const url = await adminUploadFile(file, 'screenshots', (p) => setBusy('Uploading ' + file.name + '… ' + p + '%')); await sb.from('ah_screenshots').insert({ app_id: saved.id, url, sort: sort++ }); } catch (e) { toast('Failed: ' + e.message); } } setBusy(''); loadShots(saved.id); };
   const reorder = async (from, to) => { if (to < 0 || to >= shots.length || from === to) return; const arr = [...shots]; const [m] = arr.splice(from, 1); arr.splice(to, 0, m); setShots(arr); await Promise.all(arr.map((s, i) => sb.from('ah_screenshots').update({ sort: i }).eq('id', s.id))); };
   const delShot = async (s) => { await sb.from('ah_screenshots').delete().eq('id', s.id); loadShots(saved.id); };
   const releaseNew = async () => {
@@ -259,7 +282,8 @@ function AppForm({ app, dup, onClose }) {
       <label>Publish at (optional — leave empty to publish immediately once “Published” is on)<input type="datetime-local" value={f.publish_at} onChange={set('publish_at')} /></label>
       <label className="check"><input type="checkbox" checked={f.is_featured} onChange={set('is_featured')} /> Featured on home</label><label className="check"><input type="checkbox" checked={f.is_published} onChange={set('is_published')} /> Published</label>
       <label className="check"><input type="checkbox" checked={f.is_verified} onChange={set('is_verified')} /> Verified by Appshub badge</label>
-      <div className="full row"><button className="btn" disabled={!!busy}>{saved ? 'Save changes' : 'Create app'}</button>{busy && <span className="muted">{busy}</span>}</div></form>
+      <div className="full row"><button className="btn" disabled={!!busy}>{saved ? 'Save changes' : 'Create app'}</button>{busy && <span className="muted">{busy}</span>}</div>
+      {/^.*\s(\d{1,3})%$/.test(busy || '') && <div className="full"><div className="progress"><i style={{ width: busy.match(/(\d{1,3})%$/)[1] + '%' }} /></div></div>}</form>
     {saved && <><hr /><h3>Screenshots <span className="muted small">(drag or use ◀ ▶ to reorder)</span></h3><input type="file" accept="image/*" multiple onChange={(e) => { addShots([...e.target.files]); e.target.value = ''; }} />
       <div className="shots-admin">{shots.map((s, i) => <div key={s.id} draggable onDragStart={() => (dragI.current = i)} onDragOver={(e) => e.preventDefault()} onDrop={() => { reorder(dragI.current, i); dragI.current = null; }}><img src={s.url} alt="" /><div className="row"><button className="btn sm ghost" onClick={() => reorder(i, i - 1)}>◀</button><button className="btn sm ghost" onClick={() => reorder(i, i + 1)}>▶</button><button className="btn sm danger" onClick={() => delShot(s)}>✕</button></div></div>)}</div>
       <hr /><h3>Version history</h3><p className="muted small">Current version: <b>{saved.version}</b>. “Release new version” moves the current one into history and updates the app.</p>
@@ -280,14 +304,23 @@ function AdminDevelopers() {
   const appsFor = (id) => apps.filter((a) => a.owner_id === id);
   const list = devs.filter((d) => (d.name || '').toLowerCase().includes(q.toLowerCase()));
   const suspend = async (d) => { const { error } = await sb.from('ah_developers').update({ suspended: !d.suspended }).eq('id', d.id); if (error) return toast(error.message); sb.rpc('ah_log', { p_action: d.suspended ? 'unsuspend_developer' : 'suspend_developer', p_detail: d.name }).then(() => {}); toast(d.suspended ? 'Unsuspended — their apps are visible again' : 'Suspended — their apps are hidden from visitors'); load(); };
-  const resetKey = async (d) => { if (!confirm(`Issue ${d.name} a new key? Their old key stops working immediately — you'll need to send them this new one yourself.`)) return; const { data, error } = await sb.rpc('ah_admin_reset_dev_key', { p_dev_id: d.id }); if (error) return toast(error.message); setNewKey({ name: d.name, key: data }); };
+  const resetKey = async (d) => { if (!confirm(`Issue ${d.name} a new key? Their old key stops working immediately.`)) return; const { data, error } = await sb.rpc('ah_admin_reset_dev_key', { p_dev_id: d.id }); if (error) return toast(error.message); setNewKey({ name: d.name, key: data.key, email: data.email, sent: false }); };
+  const emailKey = async () => {
+    const { data: { session } } = await sb.auth.getSession();
+    const r = await fetch('/api/dev-email', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + session.access_token }, body: JSON.stringify({ email: newKey.email, name: newKey.name, key: newKey.key }) });
+    const j = await r.json().catch(() => ({ error: r.status === 404 ? 'Emailing only works on your deployed (Vercel) site.' : 'Server error' }));
+    if (!r.ok) return toast(j.error || 'Failed to send'); setNewKey({ ...newKey, sent: true }); toast('Emailed to ' + newKey.email);
+  };
   const delDev = async (d) => { if (!confirm(`Permanently delete ${d.name} and every app they published? This can't be undone.`)) return; const { error } = await sb.rpc('ah_admin_delete_dev', { p_dev_id: d.id }); if (error) return toast(error.message); toast('Deleted'); load(); };
   return (<div className="card pad"><div className="row between"><h2>Developers ({devs.length})</h2><input placeholder="Filter…" value={q} onChange={(e) => setQ(e.target.value)} /></div>
     <p className="muted small">Anyone can get a key at <Link to="/developer">/developer</Link> (no account/email needed) to add their own apps. Suspending a developer hides all of their apps from visitors immediately.</p>
-    {newKey && <div className="alert warn" style={{ alignItems: 'flex-start', flexDirection: 'column', gap: 8 }}><b>New key for {newKey.name}</b><div className="keybox"><code>{newKey.key}</code><button className="btn sm" onClick={() => { navigator.clipboard.writeText(newKey.key); toast('Copied'); }}>Copy</button></div><p className="muted small">Send this to them yourself — it won't be shown again.</p><button className="btn sm ghost" onClick={() => setNewKey(null)}>Close</button></div>}
+    {newKey && <div className="alert warn" style={{ alignItems: 'flex-start', flexDirection: 'column', gap: 8 }}><b>New key for {newKey.name}</b><div className="keybox"><code>{newKey.key}</code><button className="btn sm" onClick={() => { navigator.clipboard.writeText(newKey.key); toast('Copied'); }}>Copy</button></div>
+      <div className="row" style={{ justifyContent: 'center', alignSelf: 'center' }}><QR text={newKey.key} size={130} /></div>
+      {newKey.email ? (newKey.sent ? <p className="muted small">✓ Emailed to {newKey.email}</p> : <button className="btn sm" onClick={emailKey}>📧 Email it to {newKey.email}</button>) : <p className="muted small">This developer didn't give an email — send this to them yourself. It won't be shown again.</p>}
+      <button className="btn sm ghost" onClick={() => setNewKey(null)}>Close</button></div>}
     {list.length ? list.map((d) => { const theirApps = appsFor(d.id); const isOpen = open === d.id; return (
       <div key={d.id} className="review">
-        <div className="row between"><div><b>{d.name}</b>{d.suspended && <span className="chip sm warnchip">suspended</span>} <span className="muted small"> · joined {timeAgo(d.created_at)}{d.last_seen ? ` · last seen ${timeAgo(d.last_seen)}` : ''}</span>{d.website && <> · <a href={safeUrl(d.website)} target="_blank" rel="noopener noreferrer">{d.website}</a></>}</div>
+        <div className="row between"><div><b>{d.name}</b>{d.suspended && <span className="chip sm warnchip">suspended</span>} <span className="muted small"> · joined {timeAgo(d.created_at)}{d.last_seen ? ` · last seen ${timeAgo(d.last_seen)}` : ''}</span>{d.email && <> · {d.email}</>}{d.website && <> · <a href={safeUrl(d.website)} target="_blank" rel="noopener noreferrer">{d.website}</a></>}</div>
           <div className="actions"><button className="btn sm ghost" onClick={() => setOpen(isOpen ? null : d.id)}>{theirApps.length} app{theirApps.length === 1 ? '' : 's'} {isOpen ? '▲' : '▼'}</button><button className="btn sm ghost" onClick={() => resetKey(d)}>Reset key</button><button className={'btn sm' + (d.suspended ? '' : ' danger')} onClick={() => suspend(d)}>{d.suspended ? 'Unsuspend' : 'Suspend'}</button><button className="btn sm danger" onClick={() => delDev(d)}>Delete</button></div></div>
         {d.bio && <p className="muted small pre">{d.bio}</p>}
         {isOpen && (theirApps.length ? <div className="table-wrap" style={{ marginTop: 8 }}><table className="table"><thead><tr><th>App</th><th>Downloads</th><th>Status</th></tr></thead><tbody>
@@ -402,7 +435,8 @@ function AdminBanners() {
   if (f) return (<div className="card pad"><h2>{f.id ? 'Edit' : 'New'} banner / ad</h2><form className="form" onSubmit={save}>
     <label>Placement<select value={f.placement} onChange={(e) => setF({ ...f, placement: e.target.value })}><option value="popup">Pop-up before download</option><option value="banner">Banner on home page</option></select></label>
     <label>Title<input required value={f.title} onChange={(e) => setF({ ...f, title: e.target.value })} /></label><label>Text<textarea rows={3} value={f.message} onChange={(e) => setF({ ...f, message: e.target.value })} /></label>
-    <label>Image<input value={f.image_url || ''} onChange={(e) => setF({ ...f, image_url: e.target.value })} placeholder="URL or upload ↓" /><input type="file" accept="image/*" onChange={async (e) => { const file = e.target.files[0]; if (!file) return; setBusy(true); try { setF({ ...f, image_url: await uploadFile(file, 'banners') }); } catch (er) { toast(er.message); } setBusy(false); }} /></label>
+    <label>Image<input value={f.image_url || ''} onChange={(e) => setF({ ...f, image_url: e.target.value })} placeholder="URL or upload ↓" /><input type="file" accept="image/*" onChange={async (e) => { const file = e.target.files[0]; if (!file) return; setBusy('0%'); try { setF({ ...f, image_url: await adminUploadFile(file, 'banners', (p) => setBusy(p + '%')) }); } catch (er) { toast(er.message); } setBusy(false); }} /></label>
+    {typeof busy === 'string' && busy.endsWith('%') && <div className="progress"><i style={{ width: busy }} /></div>}
     <label>Link when clicked (optional)<input value={f.link_url || ''} onChange={(e) => setF({ ...f, link_url: e.target.value })} placeholder="https://…" /></label>
     <div className="form two"><label>Start showing (optional)<input type="datetime-local" value={toLocalInput(f.starts_at)} onChange={(e) => setF({ ...f, starts_at: e.target.value })} /></label><label>Stop showing (optional)<input type="datetime-local" value={toLocalInput(f.ends_at)} onChange={(e) => setF({ ...f, ends_at: e.target.value })} /></label></div>
     <label className="check"><input type="checkbox" checked={f.active} onChange={(e) => setF({ ...f, active: e.target.checked })} /> Active</label>
@@ -523,11 +557,12 @@ function AdminSettings() {
   const nfields = [['telegram_bot_token', 'Telegram bot token'], ['telegram_chat_id', 'Telegram chat ID (alerts to you)'], ['telegram_channel_id', 'Telegram channel ID or @channel (announcements)'], ['resend_api_key', 'Resend API key (for email)'], ['notify_email_to', 'Send alerts to email'], ['notify_email_from', 'Email “from” (e.g. Appshub <alerts@yourdomain.com>)'], ['discord_webhook_url', 'Discord webhook URL'], ['slack_webhook_url', 'Slack webhook URL'], ['catbox_userhash', 'Catbox.moe userhash (from catbox.moe/manage — optional)']];
   const saveLegal = async () => { const { error } = await sb.from('ah_settings').upsert([{ key: 'terms_content', value: s.terms_content || '' }, { key: 'privacy_content', value: s.privacy_content || '' }]); toast(error ? error.message : 'Saved'); };
   const saveHost = async () => { const { error } = await sb.from('ah_settings').upsert({ key: 'file_host', value: s.file_host || 'supabase' }); if (error) return toast(error.message); ADMIN_UPLOAD_CFG = null; loadAdminUploadCfg(); toast('Saved'); };
-  return (<div className="cols"><div><div className="card pad"><h2>Site settings</h2><form className="form" onSubmit={async (e) => { e.preventDefault(); const keys = [...fields.map((x) => x[0]), 'donate_text', 'review_mode', 'download_captcha', 'analytics_provider', 'cookie_notice']; const { error } = await sb.from('ah_settings').upsert(keys.map((k) => ({ key: k, value: s[k] || '' }))); toast(error ? error.message : 'Saved — refresh the site to see changes'); }}>
+  return (<div className="cols"><div><div className="card pad"><h2>Site settings</h2><form className="form" onSubmit={async (e) => { e.preventDefault(); const keys = [...fields.map((x) => x[0]), 'donate_text', 'review_mode', 'download_captcha', 'dev_review_mode', 'analytics_provider', 'cookie_notice']; const { error } = await sb.from('ah_settings').upsert(keys.map((k) => ({ key: k, value: s[k] || '' }))); toast(error ? error.message : 'Saved — refresh the site to see changes'); }}>
     {fields.map(([k, l]) => <label key={k}>{l}<input value={s[k] || ''} onChange={(e) => setS({ ...s, [k]: e.target.value })} /></label>)}
     <label>Donate instructions (e.g. mobile money number)<textarea rows={3} value={s.donate_text || ''} onChange={(e) => setS({ ...s, donate_text: e.target.value })} /></label>
     <label>New reviews & questions<select value={s.review_mode || 'auto'} onChange={(e) => setS({ ...s, review_mode: e.target.value })}><option value="auto">Publish immediately</option><option value="manual">Hold until I approve</option></select></label>
     <label>Human check before downloads<select value={s.download_captcha || 'off'} onChange={(e) => setS({ ...s, download_captcha: e.target.value })}><option value="off">Off</option><option value="on">On (small maths question)</option></select></label>
+    <label>New apps from developers<select value={s.dev_review_mode || 'auto'} onChange={(e) => setS({ ...s, dev_review_mode: e.target.value })}><option value="auto">Publish immediately (developer controls it)</option><option value="manual">Hold for my approval first (Apps tab → Pending review)</option></select></label>
     <label>Analytics<select value={s.analytics_provider || 'none'} onChange={(e) => setS({ ...s, analytics_provider: e.target.value })}><option value="none">None</option><option value="ga">Google Analytics</option><option value="plausible">Plausible</option></select></label>
     <label className="check"><input type="checkbox" checked={s.cookie_notice !== 'off'} onChange={(e) => setS({ ...s, cookie_notice: e.target.checked ? 'on' : 'off' })} /> Show a cookie consent banner when analytics is on</label>
     <button className="btn">Save settings</button></form></div>
