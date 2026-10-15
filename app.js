@@ -223,6 +223,20 @@ function StarInput({ value, onChange }) {
 const Loader = () => React.createElement("div", { className: "loader" },
     React.createElement("div", { className: "spin" }));
 const Empty = ({ children }) => React.createElement("div", { className: "empty" }, children);
+function QR({ text, size = 160 }) {
+    const ref = useRef();
+    const boxRef = useRef();
+    useEffect(() => {
+        if (!window.QRCode || !ref.current)
+            return;
+        ref.current.innerHTML = '';
+        try {
+            boxRef.current = new window.QRCode(ref.current, { text, width: size, height: size, correctLevel: window.QRCode.CorrectLevel.M });
+        }
+        catch { }
+    }, [text, size]);
+    return React.createElement("div", { ref: ref, className: "qr-box", style: { width: size, height: size } });
+}
 const Verified = () => React.createElement("span", { className: "verified", title: "Verified by Appshub" },
     React.createElement(Ico, { n: "ok", s: 16 }));
 const Rate = ({ app }) => app.review_count > 0 ? React.createElement("span", { className: "rate" },
@@ -1587,34 +1601,52 @@ async function optimizeImage(file, maxDim) {
         return file;
     } // unsupported browser — fall back to the original file
 }
-async function uploadFile(file, folder) {
+// Raw XHR (instead of supabase-js's fetch-based .upload()) so we can report real
+// upload progress — supabase-js has no progress callback for storage uploads.
+function uploadToSupabaseXHR(file, folder, onProgress) {
+    return new Promise((resolve, reject) => {
+        const path = `${folder}/${Date.now()}-${Math.random().toString(36).slice(2, 6)}-${SAFE(file.name)}`;
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', `${SB_URL}/storage/v1/object/appshub/${path}`);
+        xhr.setRequestHeader('apikey', SB_KEY);
+        xhr.setRequestHeader('Authorization', `Bearer ${SB_KEY}`);
+        xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+        xhr.setRequestHeader('x-upsert', 'false');
+        xhr.upload.onprogress = (e) => { if (e.lengthComputable && onProgress)
+            onProgress(Math.round((e.loaded / e.total) * 100)); };
+        xhr.onload = () => { if (xhr.status >= 200 && xhr.status < 300)
+            resolve(`${SB_URL}/storage/v1/object/public/appshub/${path}`);
+        else
+            reject(new Error('Upload failed (' + xhr.status + ')')); };
+        xhr.onerror = () => reject(new Error('Upload failed — check your connection.'));
+        xhr.send(file);
+    });
+}
+function uploadToCatboxXHR(file, userhash, onProgress) {
+    return new Promise((resolve, reject) => {
+        const form = new FormData();
+        form.append('reqtype', 'fileupload');
+        if (userhash)
+            form.append('userhash', userhash);
+        form.append('fileToUpload', file);
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', 'https://catbox.moe/user/api.php');
+        xhr.upload.onprogress = (e) => { if (e.lengthComputable && onProgress)
+            onProgress(Math.round((e.loaded / e.total) * 100)); };
+        xhr.onload = () => { const text = (xhr.responseText || '').trim(); if (xhr.status >= 200 && xhr.status < 300 && /^https?:\/\//.test(text))
+            resolve(text);
+        else
+            reject(new Error('Catbox rejected the upload: ' + text.slice(0, 200))); };
+        xhr.onerror = () => reject(new Error('Catbox could not be reached from the browser. Switch back to Supabase in Settings.'));
+        xhr.send(form);
+    });
+}
+async function uploadFile(file, folder, onProgress) {
     if (IMG_TYPES.includes(folder))
         file = await optimizeImage(file, folder === 'icons' ? 512 : 1600);
     if (file.size > MAX_UPLOAD)
         throw new Error(`File is ${(file.size / 1024 / 1024).toFixed(1)} MB — the limit is 100 MB.`);
-    const path = `${folder}/${Date.now()}-${Math.random().toString(36).slice(2, 6)}-${SAFE(file.name)}`;
-    const { error } = await sb.storage.from('appshub').upload(path, file, { cacheControl: '31536000', upsert: false });
-    if (error)
-        throw error;
-    return sb.storage.from('appshub').getPublicUrl(path).data.publicUrl;
-}
-async function uploadToCatbox(file, userhash) {
-    const form = new FormData();
-    form.append('reqtype', 'fileupload');
-    if (userhash)
-        form.append('userhash', userhash);
-    form.append('fileToUpload', file);
-    let res;
-    try {
-        res = await fetch('https://catbox.moe/user/api.php', { method: 'POST', body: form });
-    }
-    catch {
-        throw new Error('Catbox could not be reached from the browser (it may be blocking cross-site uploads). Switch back to Supabase in Settings.');
-    }
-    const text = (await res.text()).trim();
-    if (!res.ok || !/^https?:\/\//.test(text))
-        throw new Error('Catbox rejected the upload: ' + text.slice(0, 200));
-    return text;
+    return uploadToSupabaseXHR(file, folder, onProgress);
 }
 // This branch — and the Catbox userhash it can send — is only ever reached from this
 // admin.jsx module's OWN upload call sites (AppForm, AdminBanners), never from the shared
@@ -1630,19 +1662,15 @@ async function loadAdminUploadCfg() {
 }
 sb.auth.onAuthStateChange((event) => { if (event === 'SIGNED_OUT')
     ADMIN_UPLOAD_CFG = null; });
-async function adminUploadFile(file, folder) {
+async function adminUploadFile(file, folder, onProgress) {
     if (IMG_TYPES.includes(folder))
         file = await optimizeImage(file, folder === 'icons' ? 512 : 1600);
     const limit = (ADMIN_UPLOAD_CFG === null || ADMIN_UPLOAD_CFG === void 0 ? void 0 : ADMIN_UPLOAD_CFG.host) === 'catbox' ? 200 * 1024 * 1024 : MAX_UPLOAD;
     if (file.size > limit)
         throw new Error(`File is ${(file.size / 1024 / 1024).toFixed(1)} MB — the limit is ${Math.round(limit / 1024 / 1024)} MB.`);
     if ((ADMIN_UPLOAD_CFG === null || ADMIN_UPLOAD_CFG === void 0 ? void 0 : ADMIN_UPLOAD_CFG.host) === 'catbox')
-        return uploadToCatbox(file, ADMIN_UPLOAD_CFG.catboxHash);
-    const path = `${folder}/${Date.now()}-${Math.random().toString(36).slice(2, 6)}-${SAFE(file.name)}`;
-    const { error } = await sb.storage.from('appshub').upload(path, file, { cacheControl: '31536000', upsert: false });
-    if (error)
-        throw error;
-    return sb.storage.from('appshub').getPublicUrl(path).data.publicUrl;
+        return uploadToCatboxXHR(file, ADMIN_UPLOAD_CFG.catboxHash, onProgress);
+    return uploadToSupabaseXHR(file, folder, onProgress);
 }
 async function sha256File(file) { const h = await crypto.subtle.digest('SHA-256', await file.arrayBuffer()); return [...new Uint8Array(h)].map((b) => b.toString(16).padStart(2, '0')).join(''); }
 const toCSV = (rows) => { if (!rows.length)
@@ -1905,6 +1933,7 @@ function AdminApps({ owner }) {
     const [edit, setEdit] = useState(null);
     const [q, setQ] = useState('');
     const [sel, setSel] = useState([]);
+    const [flt, setFlt] = useState('all');
     const load = () => sb.from('ah_apps').select('*').order('created_at', { ascending: false }).then(({ data }) => setApps(data || []));
     useEffect(() => { load(); }, []);
     const del = async (ids) => { if (!confirm(`Delete ${ids.length} app(s)? Reviews and screenshots go too.`))
@@ -1923,11 +1952,14 @@ function AdminApps({ owner }) {
         setSel([]);
         load();
     } };
+    const approve = async (a, ok) => { const { error } = await sb.from('ah_apps').update({ dev_approved: ok }).eq('id', a.id); if (error)
+        return toast(error.message); sb.rpc('ah_log', { p_action: ok ? 'approve_dev_app' : 'reject_dev_app', p_detail: a.name }).then(() => { }); toast(ok ? 'Approved — now visible to visitors' : 'Rejected — stays hidden'); load(); };
     if (edit)
         return React.createElement(AppForm, { app: edit === 'new' ? null : edit.dup ? edit.app : edit, dup: edit.dup, onClose: () => { setEdit(null); load(); } });
     if (!apps)
         return React.createElement(Loader, null);
-    const list = apps.filter((a) => a.name.toLowerCase().includes(q.toLowerCase()));
+    const pending = apps.filter((a) => a.owner_id && !a.dev_approved);
+    const list = apps.filter((a) => a.name.toLowerCase().includes(q.toLowerCase())).filter((a) => flt === 'all' || (flt === 'pending' && a.owner_id && !a.dev_approved));
     const allOn = list.length > 0 && list.every((a) => sel.includes(a.id));
     return (React.createElement("div", { className: "card pad" },
         React.createElement("div", { className: "row between" },
@@ -1938,6 +1970,11 @@ function AdminApps({ owner }) {
             React.createElement("div", { className: "row" },
                 React.createElement("input", { placeholder: "Filter\u2026", value: q, onChange: (e) => setQ(e.target.value) }),
                 React.createElement("button", { className: "btn", onClick: () => setEdit('new') }, "+ Add app"))),
+        React.createElement("div", { className: "chips" },
+            React.createElement("button", { className: 'chip' + (flt === 'all' ? ' active' : ''), onClick: () => setFlt('all') }, "All"),
+            React.createElement("button", { className: 'chip' + (flt === 'pending' ? ' active' : ''), onClick: () => setFlt('pending') },
+                "Pending review ",
+                pending.length > 0 && `(${pending.length})`)),
         sel.length > 0 && React.createElement("div", { className: "bulk row" },
             React.createElement("b", null,
                 sel.length,
@@ -1980,17 +2017,20 @@ function AdminApps({ owner }) {
                     React.createElement("td", null, fmtNum(a.downloads)),
                     React.createElement("td", null, fmtNum(a.views)),
                     React.createElement("td", null,
-                        a.is_published ? 'Live' : 'Hidden',
+                        a.owner_id && !a.dev_approved ? React.createElement("span", { className: "chip sm warnchip" }, "Pending review") : a.is_published ? 'Live' : 'Hidden',
                         a.is_featured && ' ⭐',
                         a.broken_reports > 0 && React.createElement("span", { className: "chip sm warnchip" },
                             "\u26A0 ",
                             a.broken_reports)),
                     React.createElement("td", { className: "actions" },
+                        a.owner_id && !a.dev_approved && React.createElement(React.Fragment, null,
+                            React.createElement("button", { className: "btn sm", onClick: () => approve(a, true) }, "Approve"),
+                            React.createElement("button", { className: "btn sm danger", onClick: () => approve(a, false) }, "Reject")),
                         a.broken_reports > 0 && React.createElement("button", { className: "btn sm ghost", onClick: async () => { await sb.from('ah_apps').update({ broken_reports: 0 }).eq('id', a.id); load(); } }, "Clear reports"),
                         React.createElement("button", { className: "btn sm ghost", onClick: () => { navigator.clipboard.writeText(appUrl(a.slug)); toast('Share link copied'); } }, "Copy link"),
                         React.createElement("button", { className: "btn sm ghost", onClick: () => setEdit({ dup: true, app: a }) }, "Duplicate"),
                         React.createElement("button", { className: "btn sm", onClick: () => setEdit(a) }, "Edit"),
-                        owner && React.createElement("button", { className: "btn sm danger", onClick: () => del([a.id]) }, "Delete"))))))) : React.createElement(Empty, null, "No apps yet. Click \u201CAdd app\u201D to publish your first one.")));
+                        owner && React.createElement("button", { className: "btn sm danger", onClick: () => del([a.id]) }, "Delete"))))))) : React.createElement(Empty, null, flt === 'pending' ? 'Nothing waiting for review.' : 'No apps yet. Click “Add app” to publish your first one.')));
 }
 function AppForm({ app, dup, onClose }) {
     const toast = useToast();
@@ -2006,6 +2046,14 @@ function AppForm({ app, dup, onClose }) {
     useEffect(() => { if (restored)
         toast('Restored your unsaved draft — a reload (e.g. while picking a file) no longer loses your work'); }, []);
     useEffect(() => { lsSet(dKey, f); }, [f]);
+    const [dirty, setDirty] = useState(() => restored);
+    const mountedRef = useRef(false);
+    useEffect(() => { if (mountedRef.current)
+        setDirty(true);
+    else
+        mountedRef.current = true; }, [f]);
+    useEffect(() => { const h = (e) => { if (!dirty)
+        return; e.preventDefault(); e.returnValue = ''; }; addEventListener('beforeunload', h); return () => removeEventListener('beforeunload', h); }, [dirty]);
     const [shots, setShots] = useState([]);
     const [versions, setVersions] = useState([]);
     const [busy, setBusy] = useState('');
@@ -2032,8 +2080,8 @@ function AppForm({ app, dup, onClose }) {
     } }, [saved === null || saved === void 0 ? void 0 : saved.id]);
     const onName = (e) => { const name = e.target.value; setF({ ...f, name, slug: slugTouched ? f.slug : slugify(name) }); };
     const up = async (file, apply, folder, hashTo) => { if (!file)
-        return; setBusy('Uploading ' + file.name + '…'); try {
-        apply(await uploadFile(file, folder));
+        return; setBusy('Uploading ' + file.name + '… 0%'); try {
+        apply(await adminUploadFile(file, folder, (p) => setBusy('Uploading ' + file.name + '… ' + p + '%')));
         if (hashTo) {
             setBusy('Calculating checksum…');
             hashTo(await sha256File(file));
@@ -2066,6 +2114,7 @@ function AppForm({ app, dup, onClose }) {
         sb.rpc('ah_log', { p_action: saved ? 'edit_app' : 'create_app', p_detail: data.name }).then(() => { });
         setSaved(data);
         setF((x) => ({ ...x, slug }));
+        setDirty(false);
         try {
             localStorage.removeItem(dKey);
         }
@@ -2073,9 +2122,9 @@ function AppForm({ app, dup, onClose }) {
         toast(saved ? 'Changes saved' : 'App created — now add screenshots and versions below');
     };
     const addShots = async (files) => { let sort = shots.length ? Math.max(...shots.map((s) => s.sort)) + 1 : 0; for (const file of files) {
-        setBusy('Uploading ' + file.name + '…');
+        setBusy('Uploading ' + file.name + '… 0%');
         try {
-            const url = await uploadFile(file, 'screenshots');
+            const url = await adminUploadFile(file, 'screenshots', (p) => setBusy('Uploading ' + file.name + '… ' + p + '%'));
             await sb.from('ah_screenshots').insert({ app_id: saved.id, url, sort: sort++ });
         }
         catch (e) {
@@ -2200,7 +2249,10 @@ function AppForm({ app, dup, onClose }) {
                 " Verified by Appshub badge"),
             React.createElement("div", { className: "full row" },
                 React.createElement("button", { className: "btn", disabled: !!busy }, saved ? 'Save changes' : 'Create app'),
-                busy && React.createElement("span", { className: "muted" }, busy))),
+                busy && React.createElement("span", { className: "muted" }, busy)),
+            /^.*\s(\d{1,3})%$/.test(busy || '') && React.createElement("div", { className: "full" },
+                React.createElement("div", { className: "progress" },
+                    React.createElement("i", { style: { width: busy.match(/(\d{1,3})%$/)[1] + '%' } })))),
         saved && React.createElement(React.Fragment, null,
             React.createElement("hr", null),
             React.createElement("h3", null,
@@ -2265,9 +2317,18 @@ function AdminDevelopers() {
     const list = devs.filter((d) => (d.name || '').toLowerCase().includes(q.toLowerCase()));
     const suspend = async (d) => { const { error } = await sb.from('ah_developers').update({ suspended: !d.suspended }).eq('id', d.id); if (error)
         return toast(error.message); sb.rpc('ah_log', { p_action: d.suspended ? 'unsuspend_developer' : 'suspend_developer', p_detail: d.name }).then(() => { }); toast(d.suspended ? 'Unsuspended — their apps are visible again' : 'Suspended — their apps are hidden from visitors'); load(); };
-    const resetKey = async (d) => { if (!confirm(`Issue ${d.name} a new key? Their old key stops working immediately — you'll need to send them this new one yourself.`))
+    const resetKey = async (d) => { if (!confirm(`Issue ${d.name} a new key? Their old key stops working immediately.`))
         return; const { data, error } = await sb.rpc('ah_admin_reset_dev_key', { p_dev_id: d.id }); if (error)
-        return toast(error.message); setNewKey({ name: d.name, key: data }); };
+        return toast(error.message); setNewKey({ name: d.name, key: data.key, email: data.email, sent: false }); };
+    const emailKey = async () => {
+        const { data: { session } } = await sb.auth.getSession();
+        const r = await fetch('/api/dev-email', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + session.access_token }, body: JSON.stringify({ email: newKey.email, name: newKey.name, key: newKey.key }) });
+        const j = await r.json().catch(() => ({ error: r.status === 404 ? 'Emailing only works on your deployed (Vercel) site.' : 'Server error' }));
+        if (!r.ok)
+            return toast(j.error || 'Failed to send');
+        setNewKey({ ...newKey, sent: true });
+        toast('Emailed to ' + newKey.email);
+    };
     const delDev = async (d) => { if (!confirm(`Permanently delete ${d.name} and every app they published? This can't be undone.`))
         return; const { error } = await sb.rpc('ah_admin_delete_dev', { p_dev_id: d.id }); if (error)
         return toast(error.message); toast('Deleted'); load(); };
@@ -2289,7 +2350,13 @@ function AdminDevelopers() {
             React.createElement("div", { className: "keybox" },
                 React.createElement("code", null, newKey.key),
                 React.createElement("button", { className: "btn sm", onClick: () => { navigator.clipboard.writeText(newKey.key); toast('Copied'); } }, "Copy")),
-            React.createElement("p", { className: "muted small" }, "Send this to them yourself \u2014 it won't be shown again."),
+            React.createElement("div", { className: "row", style: { justifyContent: 'center', alignSelf: 'center' } },
+                React.createElement(QR, { text: newKey.key, size: 130 })),
+            newKey.email ? (newKey.sent ? React.createElement("p", { className: "muted small" },
+                "\u2713 Emailed to ",
+                newKey.email) : React.createElement("button", { className: "btn sm", onClick: emailKey },
+                "\uD83D\uDCE7 Email it to ",
+                newKey.email)) : React.createElement("p", { className: "muted small" }, "This developer didn't give an email \u2014 send this to them yourself. It won't be shown again."),
             React.createElement("button", { className: "btn sm ghost", onClick: () => setNewKey(null) }, "Close")),
         list.length ? list.map((d) => {
             const theirApps = appsFor(d.id);
@@ -2304,6 +2371,9 @@ function AdminDevelopers() {
                             " \u00B7 joined ",
                             timeAgo(d.created_at),
                             d.last_seen ? ` · last seen ${timeAgo(d.last_seen)}` : ''),
+                        d.email && React.createElement(React.Fragment, null,
+                            " \u00B7 ",
+                            d.email),
                         d.website && React.createElement(React.Fragment, null,
                             " \u00B7 ",
                             React.createElement("a", { href: safeUrl(d.website), target: "_blank", rel: "noopener noreferrer" }, d.website))),
@@ -2663,12 +2733,14 @@ function AdminBanners() {
                     "Image",
                     React.createElement("input", { value: f.image_url || '', onChange: (e) => setF({ ...f, image_url: e.target.value }), placeholder: "URL or upload \u2193" }),
                     React.createElement("input", { type: "file", accept: "image/*", onChange: async (e) => { const file = e.target.files[0]; if (!file)
-                            return; setBusy(true); try {
-                            setF({ ...f, image_url: await uploadFile(file, 'banners') });
+                            return; setBusy('0%'); try {
+                            setF({ ...f, image_url: await adminUploadFile(file, 'banners', (p) => setBusy(p + '%')) });
                         }
                         catch (er) {
                             toast(er.message);
                         } setBusy(false); } })),
+                typeof busy === 'string' && busy.endsWith('%') && React.createElement("div", { className: "progress" },
+                    React.createElement("i", { style: { width: busy } })),
                 React.createElement("label", null,
                     "Link when clicked (optional)",
                     React.createElement("input", { value: f.link_url || '', onChange: (e) => setF({ ...f, link_url: e.target.value }), placeholder: "https://\u2026" })),
@@ -3024,7 +3096,7 @@ function AdminSettings() {
         React.createElement("div", null,
             React.createElement("div", { className: "card pad" },
                 React.createElement("h2", null, "Site settings"),
-                React.createElement("form", { className: "form", onSubmit: async (e) => { e.preventDefault(); const keys = [...fields.map((x) => x[0]), 'donate_text', 'review_mode', 'download_captcha', 'analytics_provider', 'cookie_notice']; const { error } = await sb.from('ah_settings').upsert(keys.map((k) => ({ key: k, value: s[k] || '' }))); toast(error ? error.message : 'Saved — refresh the site to see changes'); } },
+                React.createElement("form", { className: "form", onSubmit: async (e) => { e.preventDefault(); const keys = [...fields.map((x) => x[0]), 'donate_text', 'review_mode', 'download_captcha', 'dev_review_mode', 'analytics_provider', 'cookie_notice']; const { error } = await sb.from('ah_settings').upsert(keys.map((k) => ({ key: k, value: s[k] || '' }))); toast(error ? error.message : 'Saved — refresh the site to see changes'); } },
                     fields.map(([k, l]) => React.createElement("label", { key: k },
                         l,
                         React.createElement("input", { value: s[k] || '', onChange: (e) => setS({ ...s, [k]: e.target.value }) }))),
@@ -3041,6 +3113,11 @@ function AdminSettings() {
                         React.createElement("select", { value: s.download_captcha || 'off', onChange: (e) => setS({ ...s, download_captcha: e.target.value }) },
                             React.createElement("option", { value: "off" }, "Off"),
                             React.createElement("option", { value: "on" }, "On (small maths question)"))),
+                    React.createElement("label", null,
+                        "New apps from developers",
+                        React.createElement("select", { value: s.dev_review_mode || 'auto', onChange: (e) => setS({ ...s, dev_review_mode: e.target.value }) },
+                            React.createElement("option", { value: "auto" }, "Publish immediately (developer controls it)"),
+                            React.createElement("option", { value: "manual" }, "Hold for my approval first (Apps tab \u2192 Pending review)"))),
                     React.createElement("label", null,
                         "Analytics",
                         React.createElement("select", { value: s.analytics_provider || 'none', onChange: (e) => setS({ ...s, analytics_provider: e.target.value }) },
@@ -3283,6 +3360,7 @@ function DevKeyGate({ onKey }) {
     const [mode, setMode] = useState('new');
     const [name, setName] = useState('');
     const [site, setSite] = useState('');
+    const [email, setEmail] = useState('');
     const [pasted, setPasted] = useState('');
     const [busy, setBusy] = useState(false);
     const [err, setErr] = useState('');
@@ -3292,7 +3370,7 @@ function DevKeyGate({ onKey }) {
         e.preventDefault();
         setBusy(true);
         setErr('');
-        const { data, error } = await sb.rpc('ah_dev_register', { p_name: name.trim(), p_website: site.trim() });
+        const { data, error } = await sb.rpc('ah_dev_register', { p_name: name.trim(), p_website: site.trim(), p_email: email.trim() });
         setBusy(false);
         if (error)
             return setErr(error.message.replace(/^.*?:\s*/, ''));
@@ -3317,9 +3395,12 @@ function DevKeyGate({ onKey }) {
                 React.createElement("div", { className: "alert warn" },
                     React.createElement(Ico, { n: "warn", s: 18 }),
                     " Save this somewhere safe now. It will not be shown again, there's no email tied to it, and anyone with it can manage your apps."),
+                React.createElement("div", { className: "row", style: { justifyContent: 'center', margin: '10px 0' } },
+                    React.createElement(QR, { text: issued })),
                 React.createElement("div", { className: "keybox" },
                     React.createElement("code", null, issued),
                     React.createElement("button", { type: "button", className: "btn sm", onClick: () => { navigator.clipboard.writeText(issued); toast('Copied'); } }, "Copy")),
+                React.createElement("p", { className: "muted small center" }, "Scan the code to save your key on your phone, or copy it as text."),
                 React.createElement("label", { className: "check", style: { marginTop: 14 } },
                     React.createElement("input", { type: "checkbox", checked: saved, onChange: (e) => setSaved(e.target.checked) }),
                     " I've saved my key somewhere safe"),
@@ -3338,6 +3419,9 @@ function DevKeyGate({ onKey }) {
                 React.createElement("label", null,
                     "Website (optional)",
                     React.createElement("input", { type: "url", maxLength: 300, value: site, onChange: (e) => setSite(e.target.value), placeholder: "https://\\u2026" })),
+                React.createElement("label", null,
+                    "Email (optional)",
+                    React.createElement("input", { type: "email", maxLength: 200, value: email, onChange: (e) => setEmail(e.target.value), placeholder: "only used if you ever lose your key" })),
                 err && React.createElement("div", { className: "alert" }, err),
                 React.createElement("button", { className: "btn", disabled: busy }, busy ? 'Please wait\u2026' : 'Get my key'))) : (React.createElement("form", { className: "form", onSubmit: useExisting },
                 React.createElement("label", null,
@@ -3419,8 +3503,9 @@ function DevProfileForm({ me, dkey }) {
     const [name, setName] = useState(me.name || '');
     const [bio, setBio] = useState(me.bio || '');
     const [site, setSite] = useState(me.website || '');
+    const [email, setEmail] = useState(me.email || '');
     const [busy, setBusy] = useState(false);
-    const save = async (e) => { e.preventDefault(); setBusy(true); const { error } = await sb.rpc('ah_dev_update_profile', { p_key: dkey, p_name: name, p_bio: bio, p_website: site }); setBusy(false); if (error)
+    const save = async (e) => { e.preventDefault(); setBusy(true); const { error } = await sb.rpc('ah_dev_update_profile', { p_key: dkey, p_name: name, p_bio: bio, p_website: site, p_email: email.trim() }); setBusy(false); if (error)
         return toast(error.message.replace(/^.*?:\s*/, '')); toast('Saved'); };
     return (React.createElement("div", { className: "card pad narrow" },
         React.createElement("h2", null, "Your developer profile"),
@@ -3435,6 +3520,9 @@ function DevProfileForm({ me, dkey }) {
             React.createElement("label", null,
                 "Website",
                 React.createElement("input", { type: "url", value: site, onChange: (e) => setSite(e.target.value), placeholder: "https://\\u2026", maxLength: 300 })),
+            React.createElement("label", null,
+                "Email (optional, only used if you lose your key)",
+                React.createElement("input", { type: "email", value: email, onChange: (e) => setEmail(e.target.value), maxLength: 200 })),
             React.createElement("button", { className: "btn", disabled: busy }, busy ? 'Saving\u2026' : 'Save profile'))));
 }
 function DevKeyPanel({ dkey, onKey, onLogout }) {
@@ -3457,6 +3545,8 @@ function DevKeyPanel({ dkey, onKey, onLogout }) {
                 show ? React.createElement("code", null, dkey) : React.createElement("code", null, "\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022"),
                 React.createElement("button", { type: "button", className: "btn sm ghost", onClick: () => setShow(!show) }, show ? 'Hide' : 'Show'),
                 React.createElement("button", { type: "button", className: "btn sm", onClick: () => { navigator.clipboard.writeText(dkey); toast('Copied'); } }, "Copy")),
+            show && React.createElement("div", { className: "row", style: { justifyContent: 'center', margin: '10px 0' } },
+                React.createElement(QR, { text: dkey, size: 140 })),
             React.createElement("button", { className: "btn ghost", style: { marginTop: 12 }, disabled: busy, onClick: rotate }, "Generate a new key")),
         React.createElement("div", { className: "card pad" },
             React.createElement("h2", null, "\\u26a0\\ufe0f Danger zone"),
@@ -3606,6 +3696,14 @@ function DevAppForm({ app, dkey, devId, onClose }) {
     useEffect(() => { if (restored)
         toast('Restored your unsaved draft'); }, []);
     useEffect(() => { lsSet(dKey, f); }, [f]);
+    const [dirty, setDirty] = useState(() => restored);
+    const mountedRef = useRef(false);
+    useEffect(() => { if (mountedRef.current)
+        setDirty(true);
+    else
+        mountedRef.current = true; }, [f]);
+    useEffect(() => { const h = (e) => { if (!dirty)
+        return; e.preventDefault(); e.returnValue = ''; }; addEventListener('beforeunload', h); return () => removeEventListener('beforeunload', h); }, [dirty]);
     const [shots, setShots] = useState([]);
     const [versions, setVersions] = useState([]);
     const [busy, setBusy] = useState('');
@@ -3621,11 +3719,11 @@ function DevAppForm({ app, dkey, devId, onClose }) {
     } }, [saved === null || saved === void 0 ? void 0 : saved.id]);
     const onName = (e) => { const name = e.target.value; setF({ ...f, name, slug: slugTouched ? f.slug : slugify(name) }); };
     const up = async (file, apply, folder, hashTo) => { if (!file)
-        return; setBusy('Uploading ' + file.name + '\u2026'); try {
+        return; setBusy('Uploading ' + file.name + '\u2026 0%'); try {
         let fx = file;
         if (folder.includes('icons') || folder.includes('screenshots'))
             fx = await optimizeImage(file, folder.includes('icons') ? 512 : 1600);
-        apply(await uploadFile(fx, folder));
+        apply(await uploadFile(fx, folder, (p) => setBusy('Uploading ' + file.name + '\u2026 ' + p + '%')));
         if (hashTo)
             hashTo(await sha256File(file));
         toast('Uploaded');
@@ -3643,6 +3741,7 @@ function DevAppForm({ app, dkey, devId, onClose }) {
             return toast(error.message.replace(/^.*?:\s*/, ''));
         setSaved(data);
         setF((x) => ({ ...x, slug: data.slug }));
+        setDirty(false);
         try {
             localStorage.removeItem(dKey);
         }
@@ -3650,10 +3749,10 @@ function DevAppForm({ app, dkey, devId, onClose }) {
         toast(saved ? 'Changes saved' : 'App created \u2014 add a screenshot below, then publish it');
     };
     const addShots = async (files) => { for (const file of files) {
-        setBusy('Uploading ' + file.name + '\u2026');
+        setBusy('Uploading ' + file.name + '\u2026 0%');
         try {
             const small = await optimizeImage(file, 1600);
-            const url = await uploadFile(small, `dev/${devId}/screenshots`);
+            const url = await uploadFile(small, `dev/${devId}/screenshots`, (p) => setBusy('Uploading ' + file.name + '\u2026 ' + p + '%'));
             const { error } = await sb.rpc('ah_dev_add_shot', { p_key: dkey, p_app_id: saved.id, p_url: url });
             if (error)
                 throw error;
@@ -3736,7 +3835,10 @@ function DevAppForm({ app, dkey, devId, onClose }) {
                 " Published (visible to visitors)"),
             React.createElement("div", { className: "full row" },
                 React.createElement("button", { className: "btn", disabled: !!busy }, saved ? 'Save changes' : 'Create app'),
-                busy && React.createElement("span", { className: "muted" }, busy))),
+                busy && React.createElement("span", { className: "muted" }, busy)),
+            /\s(\d{1,3})%$/.test(busy || '') && React.createElement("div", { className: "full" },
+                React.createElement("div", { className: "progress" },
+                    React.createElement("i", { style: { width: busy.match(/(\d{1,3})%$/)[1] + '%' } })))),
         saved && React.createElement(React.Fragment, null,
             React.createElement("hr", null),
             React.createElement("h3", null,

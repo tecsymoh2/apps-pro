@@ -228,3 +228,10 @@ table.compare th a{display:flex;flex-direction:column;align-items:center;gap:6px
 /* ----- developer key UI ----- */
 .keybox{display:flex;gap:8px;align-items:center;background:var(--surface);border-radius:10px;padding:10px 12px;flex-wrap:wrap}
 .keybox code{flex:1;min-width:160px;word-break:break-all;font-size:.85rem}
+
+/* ----- upload progress ----- */
+.progress{height:6px;background:var(--surface);border-radius:4px;overflow:hidden;margin-top:4px}
+.progress i{display:block;height:100%;background:var(--brand);border-radius:4px;transition:width .15s}
+
+/* ----- QR code box ----- */
+.qr-box{background:#fff;padding:8px;border-radius:10px;display:inline-block}
